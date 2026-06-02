@@ -1236,6 +1236,27 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(url.contains("/members"))
     }
 
+    @Test func adminUserGetEscapesTabInName() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The JSON "\t" decodes to a real tab; the single-line output is
+        // tab-delimited, so the name must be re-escaped to "\t" rather than
+        // opening a phantom column.
+        let json = #"{"name":{"fullName":"A\tB"},"primaryEmail":"a@x.com"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin user a@x.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains(#"A\tB"#))
+        #expect(!run.stdout.contains("A\tB"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

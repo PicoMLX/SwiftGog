@@ -1752,10 +1752,12 @@ struct AdminUser: AsyncParsableCommand {
             return
         }
         let user = try JSONDecoder().decode(DirUser.self, from: body)
-        let name = user.name?.fullName ?? "(unknown)"
+        let name = tsvEscaped(user.name?.fullName ?? "(unknown)")
         let email = user.primaryEmail ?? ""
         var line = "\(name)\(email.isEmpty ? "" : " <\(email)>")"
-        if let ou = user.orgUnitPath, !ou.isEmpty { line += "\torgUnit=\(ou)" }
+        if let ou = user.orgUnitPath, !ou.isEmpty {
+            line += "\torgUnit=\(tsvEscaped(ou))"
+        }
         if user.isAdmin == true { line += "\tadmin" }
         if user.suspended == true { line += "\tsuspended" }
         Shell.bashCurrent.stdout(line + "\n")
@@ -1831,7 +1833,7 @@ struct AdminGroup: AsyncParsableCommand {
             return
         }
         let group = try JSONDecoder().decode(DirGroup.self, from: body)
-        let name = group.name ?? "(unknown)"
+        let name = tsvEscaped(group.name ?? "(unknown)")
         let email = group.email ?? ""
         var line = "\(name)\(email.isEmpty ? "" : " <\(email)>")"
         line += "\tmembers=\(group.directMembersCount ?? "0")"
