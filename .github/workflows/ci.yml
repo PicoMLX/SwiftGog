@@ -48,6 +48,17 @@ jobs:
       - name: Swift version
         run: swift --version
 
+      # Critical contract: command/client code must route file I/O through
+      # Shell.bashCurrent.fileSystem and HTTP through SecureFetcher. These APIs
+      # would bypass the sandbox, so fail the build if they appear.
+      - name: Sandbox lint guard
+        working-directory: SwiftGog
+        run: |
+          if grep -rnE 'FileManager|Data\(contentsOf:|URLSession' Sources/GogCore Sources/GogCommands; then
+            echo "::error::Forbidden API in GogCore/GogCommands — use Shell.bashCurrent.fileSystem / SecureFetcher (see PLAN.md Critical contracts)."
+            exit 1
+          fi
+
       - name: Cache SwiftPM build
         uses: actions/cache@v4
         with:
