@@ -1078,6 +1078,21 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("PL1\tFaves"))
     }
 
+    @Test func youtubeMyChannelExitsNonZeroWhenNoChannel() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"items":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog youtube my-channel")
+            }
+        }
+        #expect(run.exitStatus != .success)
+    }
+
     @Test func youtubeSearchRejectsBadMax() async throws {
         let shell = Shell()
         shell.registerGogCommands()

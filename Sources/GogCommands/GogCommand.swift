@@ -1537,8 +1537,8 @@ struct YouTubeMyChannel: AsyncParsableCommand {
         }
         let list = try JSONDecoder().decode(YTChannelList.self, from: body)
         guard let channel = list.items?.first else {
-            Shell.bashCurrent.stderr("No channel\n")
-            return
+            Shell.bashCurrent.stderr("gog: no channel found for this account\n")
+            throw ExitCode(1)
         }
         let title = channel.snippet?.title ?? ""
         let subscribers = channel.statistics?.subscriberCount ?? "0"
