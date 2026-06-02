@@ -628,6 +628,22 @@ private struct MockTransport: GogTransport {
         #expect(run.stderr.contains("next page token: NPT2"))
     }
 
+    @Test func tasksListsAcceptsLargeMax() async throws {
+        // tasklists.list allows maxResults up to 1000 (tasks.list is capped at 100).
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"items":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks lists --max 500")
+            }
+        }
+        #expect(run.exitStatus == .success)
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

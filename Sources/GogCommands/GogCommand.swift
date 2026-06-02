@@ -800,7 +800,7 @@ struct TasksLists: AsyncParsableCommand {
         commandName: "lists",
         abstract: "List your task lists.")
 
-    @Option(name: .long, help: "Maximum task lists to return (1–100).")
+    @Option(name: .long, help: "Maximum task lists to return (1–1000).")
     var max: Int = 100
     @Option(name: .long, help: "Page token from a previous listing.")
     var page: String?
@@ -808,8 +808,8 @@ struct TasksLists: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
-        guard max > 0, max <= 100 else {
-            Shell.bashCurrent.stderr("gog: --max must be between 1 and 100\n")
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
             throw ExitCode(2)
         }
         var query = [URLQueryItem(name: "maxResults", value: String(max))]
