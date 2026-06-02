@@ -12,7 +12,7 @@ public struct GogCommand: AsyncParsableCommand {
         commandName: "gog",
         abstract: "Google Workspace CLI (sandboxed, SwiftBash-native).",
         version: GogVersionInfo.version,
-        subcommands: [GogVersion.self, GogMe.self, GogAuth.self])
+        subcommands: [GogVersion.self, GogMe.self, GogDrive.self, GogAuth.self])
 
     public init() {}
 }
@@ -75,6 +75,84 @@ private struct PeopleMe: Decodable {
     struct Email: Decodable { let value: String? }
     let names: [Name]?
     let emailAddresses: [Email]?
+}
+
+/// `gog drive …` — Google Drive group.
+struct GogDrive: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "drive",
+        abstract: "Google Drive.",
+        aliases: ["drv"],
+        subcommands: [DriveLs.self])
+}
+
+/// `gog drive ls` — list Drive files (Drive v3 `files.list`). Mirrors gogcli's
+/// `internal/cmd/drive_listing.go`: validate → query → emit JSON (`--json`,
+/// byte-for-byte from Google) or a TSV of `id<TAB>name<TAB>mimeType`.
+struct DriveLs: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ls",
+        abstract: "List Drive files.",
+        aliases: ["list"])
+
+    @Option(name: .long, help: "Only list children of this folder ID.")
+    var parent: String?
+    @Option(name: .long, help: "Maximum number of files to return (1–1000).")
+    var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+
+        var comps = URLComponents(
+            string: "https://www.googleapis.com/drive/v3/files")!
+        var query = [
+            URLQueryItem(name: "pageSize", value: String(max)),
+            URLQueryItem(name: "fields",
+                value: "nextPageToken,files(id,name,mimeType,modifiedTime,size)"),
+        ]
+        if let parent {
+            query.append(URLQueryItem(
+                name: "q", value: "'\(parent)' in parents and trashed = false"))
+        }
+        if let page {
+            query.append(URLQueryItem(name: "pageToken", value: page))
+        }
+        comps.queryItems = query
+
+        let body = try await GoogleHTTPClient().get(comps.url!)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+
+        let listing = try JSONDecoder().decode(DriveFileList.self, from: body)
+        let files = listing.files ?? []
+        if files.isEmpty { Shell.bashCurrent.stderr("No files\n") }
+        for file in files {
+            Shell.bashCurrent.stdout(
+                "\(file.id ?? "")\t\(file.name ?? "")\t\(file.mimeType ?? "")\n")
+        }
+        if let next = listing.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+private struct DriveFileList: Decodable {
+    struct File: Decodable {
+        let id: String?
+        let name: String?
+        let mimeType: String?
+    }
+    let files: [File]?
+    let nextPageToken: String?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only

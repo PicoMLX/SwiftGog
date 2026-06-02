@@ -84,6 +84,27 @@ private struct StubProvider: GogCredentialProvider {
         #expect(run.stderr.contains("no credentials"))
     }
 
+    @Test func driveLsRejectsBadMax() async throws {
+        // Validation happens before any network/credential use, so this needs
+        // neither — exit 2 with a usage diagnostic.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive ls --max 0")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--max"))
+    }
+
+    @Test func driveLsFailsClosedWithoutCredentials() async throws {
+        let shell = Shell()
+        shell.networkConfig = NetworkConfig(
+            allowedURLPrefixes: [AllowedURLEntry("https://www.googleapis.com/")],
+            allowedMethods: [.GET])
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive ls --max 10")
+        #expect(run.exitStatus == ExitStatus(7))
+        #expect(run.stderr.contains("no credentials"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
