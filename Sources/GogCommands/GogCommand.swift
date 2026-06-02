@@ -38,7 +38,7 @@ public struct GogCommand: AsyncParsableCommand {
             GogVersion.self, GogMe.self,
             GogDrive.self, GogGmail.self, GogCalendar.self,
             GogContacts.self, GogTasks.self, GogDocs.self, GogSheets.self,
-            GogChat.self, GogSlides.self, GogAuth.self,
+            GogChat.self, GogSlides.self, GogForms.self, GogAuth.self,
             // Top-level aliases (mirrors gogcli's `gog ls` / `gog send`).
             DriveLs.self, GmailSend.self,
         ])
@@ -363,7 +363,7 @@ struct GogGmail: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gmail",
         abstract: "Gmail.",
-        subcommands: [GmailMessages.self, GmailGet.self, GmailSend.self],
+        subcommands: [GmailMessages.self, GmailGet.self, GmailSend.self, GmailLabels.self],
         aliases: ["mail", "email"])
 }
 
@@ -1382,6 +1382,119 @@ private struct ChatMessage: Decodable {
     let name: String?
     let text: String?
 }
+
+// MARK: - Forms
+
+/// `gog forms …` — Google Forms.
+struct GogForms: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "forms",
+        abstract: "Google Forms.",
+        subcommands: [FormsGet.self, FormsResponses.self],
+        aliases: ["form"])
+}
+
+/// `gog forms get <formId>` — a form's title and item count.
+struct FormsGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Show a form's title and item count.")
+
+    @Argument(help: "Form ID.") var formId: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL("https://forms.googleapis.com/v1/forms", id: formId)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let form = try JSONDecoder().decode(Form.self, from: body)
+        let title = form.info?.title ?? form.info?.documentTitle ?? "(untitled)"
+        Shell.bashCurrent.stdout("\(tsvEscaped(title))\t\(form.items?.count ?? 0) items\n")
+    }
+}
+
+/// `gog forms responses <formId>` — submitted responses (paginated).
+struct FormsResponses: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "responses",
+        abstract: "List a form's responses.")
+
+    @Argument(help: "Form ID.") var formId: String
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        var query: [URLQueryItem] = []
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://forms.googleapis.com/v1/forms", id: "\(formId)/responses",
+            query: query)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(FormResponseList.self, from: body)
+        let responses = list.responses ?? []
+        if responses.isEmpty { Shell.bashCurrent.stderr("No responses\n") }
+        for response in responses {
+            Shell.bashCurrent.stdout(
+                "\(response.responseId ?? "")\t\(response.createTime ?? "")\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+private struct Form: Decodable {
+    struct Info: Decodable { let title: String?; let documentTitle: String? }
+    struct Item: Decodable {}
+    let info: Info?
+    let items: [Item]?
+}
+private struct FormResponseList: Decodable {
+    let responses: [FormResponse]?
+    let nextPageToken: String?
+}
+private struct FormResponse: Decodable {
+    let responseId: String?
+    let createTime: String?
+}
+
+/// `gog gmail labels` — list the account's labels (extends the Gmail group).
+struct GmailLabels: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "labels",
+        abstract: "List Gmail labels.")
+
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL("https://gmail.googleapis.com/gmail/v1/users/me/labels")
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(LabelList.self, from: body)
+        let labels = list.labels ?? []
+        if labels.isEmpty { Shell.bashCurrent.stderr("No labels\n") }
+        for label in labels {
+            Shell.bashCurrent.stdout("\(label.id ?? "")\t\(tsvEscaped(label.name ?? ""))\n")
+        }
+    }
+}
+
+private struct LabelList: Decodable { let labels: [Label]? }
+private struct Label: Decodable { let id: String?; let name: String? }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
 /// MVP leaf is `status`.

@@ -968,6 +968,57 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(String(decoding: saved, as: UTF8.self) == "PDFDATA")
     }
 
+    @Test func formsGetRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"info":{"title":"Survey"},"items":[{},{}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog forms get FID")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Survey\t2 items"))
+    }
+
+    @Test func formsResponsesRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"responses":[{"responseId":"r1","createTime":"2026-06-02T00:00:00Z"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog forms responses FID")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("r1\t2026-06-02T00:00:00Z"))
+    }
+
+    @Test func gmailLabelsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"labels":[{"id":"INBOX","name":"INBOX"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail labels")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("INBOX\tINBOX"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
