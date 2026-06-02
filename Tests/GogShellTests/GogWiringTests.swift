@@ -835,6 +835,48 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.lastURL == nil)   // export not performed for a bad dest
     }
 
+    @Test func sheetsGetPadsTrailingEmptyRows() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A1:A3 with only A1 populated must still render three rows.
+        let json = #"{"range":"Sheet1!A1:A3","values":[["x"]]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets get SID 'Sheet1!A1:A3'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout == "x\n\n\n")
+    }
+
+    @Test func docsCatDoesNotTouchSiblingPrecheckFile() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        // A real file a fixed-name probe would have clobbered.
+        try await shell.fileSystem.writeData(
+            Data("keep".utf8), to: "/gog/doc.md.gog-precheck", append: false)
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data("exported".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog docs cat DOCID --out /gog/doc.md")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let sibling = try await shell.fileSystem.readData("/gog/doc.md.gog-precheck")
+        #expect(String(decoding: sibling, as: UTF8.self) == "keep")
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

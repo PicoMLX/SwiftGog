@@ -338,17 +338,9 @@ struct DriveDownload: AsyncParsableCommand {
 
     func run() async throws {
         let resolved = Shell.bashCurrent.resolvePath(out)
-        // Validate writability via a sibling probe — without truncating an
-        // existing destination — so a later download failure can't destroy it.
-        let probe = resolved + ".gog-precheck"
-        do {
-            try await Shell.bashCurrent.fileSystem.writeData(
-                Data(), to: probe, append: false)
-            try? await Shell.bashCurrent.fileSystem.remove(probe, recursive: false)
-        } catch {
-            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
-            throw ExitCode(23)
-        }
+        // Validate the destination (non-destructively) before spending the
+        // download, so an out-of-mount path fails closed without a fetch.
+        try await ensureWritableDestination(resolved, label: out)
         let url = try googleURL(
             "https://www.googleapis.com/drive/v3/files", id: id,
             query: [URLQueryItem(name: "alt", value: "media")])
@@ -960,17 +952,10 @@ struct DocsCat: AsyncParsableCommand {
             Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self))
             return
         }
-        // Validate the destination before exporting (probe a sibling so an
-        // existing file isn't truncated), mirroring drive download.
+        // Validate the destination (non-destructively) before exporting,
+        // mirroring drive download.
         let path = Shell.bashCurrent.resolvePath(out)
-        let probe = path + ".gog-precheck"
-        do {
-            try await Shell.bashCurrent.fileSystem.writeData(Data(), to: probe, append: false)
-            try? await Shell.bashCurrent.fileSystem.remove(probe, recursive: false)
-        } catch {
-            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
-            throw ExitCode(23)
-        }
+        try await ensureWritableDestination(path, label: out)
         let data = try await GoogleHTTPClient().get(url)
         do {
             try await Shell.bashCurrent.fileSystem.writeData(data, to: path, append: false)
@@ -1008,7 +993,7 @@ private func sheetsValuesURL(spreadsheetId: String, range: String,
 
 /// Column count for an A1 range like "Sheet1!A1:C10" → 3, or nil for a single
 /// cell or an unbounded range (where padding can't be inferred).
-private func sheetsRangeColumnCount(_ range: String?) -> Int? {
+private func sheetsRangeDimensions(_ range: String?) -> (rows: Int?, cols: Int?)? {
     guard let range else { return nil }
     let a1 = range.split(separator: "!").last.map(String.init) ?? range
     let bounds = a1.split(separator: ":", maxSplits: 1).map(String.init)
@@ -1023,10 +1008,31 @@ private func sheetsRangeColumnCount(_ range: String?) -> Int? {
         }
         return index
     }
-    guard let start = columnIndex(bounds[0]), let end = columnIndex(bounds[1]) else {
-        return nil
+    func rowNumber(_ cell: String) -> Int? { Int(cell.drop { $0.isLetter }) }
+    let cols: Int? = {
+        guard let s = columnIndex(bounds[0]), let e = columnIndex(bounds[1]) else { return nil }
+        return max(1, e - s + 1)
+    }()
+    let rows: Int? = {
+        guard let s = rowNumber(bounds[0]), let e = rowNumber(bounds[1]) else { return nil }
+        return max(1, e - s + 1)
+    }()
+    return (rows: rows, cols: cols)
+}
+
+/// Non-destructive writability check for a destination: confirms the parent
+/// directory is reachable inside a mount (so out-of-mount paths fail closed
+/// before any network fetch) without creating or deleting any files — avoids
+/// clobbering an unrelated sibling that a fixed probe name might collide with.
+private func ensureWritableDestination(_ resolvedPath: String, label: String) async throws {
+    let parent = (resolvedPath as NSString).deletingLastPathComponent
+    let directory = parent.isEmpty ? "/" : parent
+    let metadata = (try? await Shell.bashCurrent.fileSystem.metadata(directory)).flatMap { $0 }
+    if metadata == nil {
+        Shell.bashCurrent.stderr(
+            "gog: cannot write \(label): no such directory in the sandbox\n")
+        throw ExitCode(23)
     }
-    return max(1, end - start + 1)
 }
 
 /// `gog sheets get <spreadsheetId> <range>` — read a range of values.
@@ -1049,14 +1055,20 @@ struct SheetsGet: AsyncParsableCommand {
         }
         let result = try JSONDecoder().decode(ValueRange.self, from: body)
         let rows = result.values ?? []
-        if rows.isEmpty { Shell.bashCurrent.stderr("No values\n") }
-        // Sheets omits trailing empty cells; pad to the requested range width (or
-        // the widest returned row) so the TSV keeps a consistent column count.
-        let width = sheetsRangeColumnCount(result.range) ?? (rows.map(\.count).max() ?? 0)
-        for row in rows {
+        if rows.isEmpty {
+            Shell.bashCurrent.stderr("No values\n")
+            return
+        }
+        // Sheets omits trailing empty rows/columns; pad to the requested range
+        // dimensions (or the widest returned row) so the TSV keeps a consistent
+        // shape. (`--json` stays lossless.)
+        let dimensions = sheetsRangeDimensions(result.range)
+        let width = dimensions?.cols ?? (rows.map(\.count).max() ?? 0)
+        let height = max(dimensions?.rows ?? rows.count, rows.count)
+        for index in 0..<height {
             // Escape delimiters so a cell containing a tab/newline can't break
             // the one-row-per-record TSV shape.
-            var cells = row.map { cell in
+            var cells = (index < rows.count ? rows[index] : []).map { cell in
                 cell.text
                     .replacingOccurrences(of: "\\", with: "\\\\")
                     .replacingOccurrences(of: "\t", with: "\\t")
