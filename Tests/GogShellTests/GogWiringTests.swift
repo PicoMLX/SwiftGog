@@ -611,6 +611,23 @@ private struct MockTransport: GogTransport {
         #expect(run.stderr.contains("next page token: NPT"))
     }
 
+    @Test func tasksListsSurfacesNextPageToken() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"L1","title":"x"}],"nextPageToken":"NPT2"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks lists --page PREV")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("next page token: NPT2"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

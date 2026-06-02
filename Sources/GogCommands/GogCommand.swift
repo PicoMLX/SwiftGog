@@ -800,11 +800,22 @@ struct TasksLists: AsyncParsableCommand {
         commandName: "lists",
         abstract: "List your task lists.")
 
+    @Option(name: .long, help: "Maximum task lists to return (1–100).")
+    var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
 
     func run() async throws {
-        let url = try googleURL("https://tasks.googleapis.com/tasks/v1/users/@me/lists")
+        guard max > 0, max <= 100 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 100\n")
+            throw ExitCode(2)
+        }
+        var query = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://tasks.googleapis.com/tasks/v1/users/@me/lists", query: query)
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
@@ -815,6 +826,9 @@ struct TasksLists: AsyncParsableCommand {
         if lists.isEmpty { Shell.bashCurrent.stderr("No task lists\n") }
         for list in lists {
             Shell.bashCurrent.stdout("\(list.id ?? "")\t\(list.title ?? "")\n")
+        }
+        if let next = result.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
         }
     }
 }
@@ -890,6 +904,7 @@ struct TasksAdd: AsyncParsableCommand {
 private struct TaskListCollection: Decodable {
     struct Item: Decodable { let id: String?; let title: String? }
     let items: [Item]?
+    let nextPageToken: String?
 }
 
 private struct TaskCollection: Decodable {
