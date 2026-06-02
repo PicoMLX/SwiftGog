@@ -480,6 +480,119 @@ private struct MockTransport: GogTransport {
         #expect(String(decoding: kept, as: UTF8.self) == "ORIGINAL")
     }
 
+    @Test func gogLsAliasListsDrive() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"files":[{"id":"a","name":"n","mimeType":"text/plain"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog ls")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("a\tn\ttext/plain"))
+    }
+
+    @Test func gogSendAliasDryRun() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog send --to a@b.com --subject Hi --body Yo --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("a@b.com"))
+    }
+
+    @Test func contactsListRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"connections":[{"resourceName":"people/c1","#
+            + #""names":[{"displayName":"Ada"}],"#
+            + #""emailAddresses":[{"value":"ada@x.com"}]}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts list")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("people/c1\tAda\tada@x.com"))
+    }
+
+    @Test func contactsGetRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"resourceName":"people/c1","names":[{"displayName":"Ada"}],"#
+            + #""emailAddresses":[{"value":"ada@x.com"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts get people/c1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Ada <ada@x.com>"))
+    }
+
+    @Test func tasksListsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"L1","title":"My List"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks lists")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("L1\tMy List"))
+    }
+
+    @Test func tasksListRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"T1","title":"Buy milk","status":"needsAction"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks list")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("T1\tneedsAction\tBuy milk"))
+    }
+
+    @Test func tasksAddPosts() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"T9"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks add 'Buy milk'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("added: T9"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

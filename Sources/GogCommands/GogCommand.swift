@@ -34,7 +34,13 @@ public struct GogCommand: AsyncParsableCommand {
         commandName: "gog",
         abstract: "Google Workspace CLI (sandboxed, SwiftBash-native).",
         version: GogVersionInfo.version,
-        subcommands: [GogVersion.self, GogMe.self, GogDrive.self, GogGmail.self, GogCalendar.self, GogAuth.self])
+        subcommands: [
+            GogVersion.self, GogMe.self,
+            GogDrive.self, GogGmail.self, GogCalendar.self,
+            GogContacts.self, GogTasks.self, GogAuth.self,
+            // Top-level aliases (mirrors gogcli's `gog ls` / `gog send`).
+            DriveLs.self, GmailSend.self,
+        ])
 
     public init() {}
 }
@@ -677,6 +683,212 @@ private struct CalEvent: Decodable {
 
     /// Best-effort start label: dateTime, else all-day date, else empty.
     var when: String { start?.dateTime ?? start?.date ?? "" }
+}
+
+// MARK: - Contacts (People API connections)
+
+/// `gog contacts …` — Google Contacts via the People API.
+struct GogContacts: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "contacts",
+        abstract: "Google Contacts.",
+        subcommands: [ContactsList.self, ContactsGet.self],
+        aliases: ["contact"])
+}
+
+/// `gog contacts list` — your connections.
+struct ContactsList: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list",
+        abstract: "List your contacts.")
+
+    @Option(name: .long, help: "Maximum contacts to return (1–1000).")
+    var max: Int = 100
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+        let url = try googleURL(
+            "https://people.googleapis.com/v1/people/me/connections",
+            query: [
+                URLQueryItem(name: "personFields", value: "names,emailAddresses"),
+                URLQueryItem(name: "pageSize", value: String(max)),
+            ])
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(ContactList.self, from: body)
+        let people = list.connections ?? []
+        if people.isEmpty { Shell.bashCurrent.stderr("No contacts\n") }
+        for person in people {
+            let name = person.names?.first?.displayName ?? ""
+            let email = person.emailAddresses?.first?.value ?? ""
+            Shell.bashCurrent.stdout("\(person.resourceName ?? "")\t\(name)\t\(email)\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog contacts get <resourceName>` — one contact (e.g. `people/c123`).
+struct ContactsGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Show a contact by resource name (e.g. people/c123).")
+
+    @Argument(help: "Contact resource name, e.g. people/c123.")
+    var resourceName: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        // `.urlPathAllowed` keeps the `/` in `people/c123` while still escaping
+        // anything unsafe.
+        let url = try googleURL(
+            "https://people.googleapis.com/v1", id: resourceName,
+            query: [URLQueryItem(name: "personFields", value: "names,emailAddresses")])
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let person = try JSONDecoder().decode(Contact.self, from: body)
+        let name = person.names?.first?.displayName ?? "(unknown)"
+        let email = person.emailAddresses?.first?.value ?? ""
+        Shell.bashCurrent.stdout("\(name)\(email.isEmpty ? "" : " <\(email)>")\n")
+    }
+}
+
+private struct ContactList: Decodable {
+    let connections: [Contact]?
+    let nextPageToken: String?
+}
+
+private struct Contact: Decodable {
+    struct Name: Decodable { let displayName: String? }
+    struct Email: Decodable { let value: String? }
+    let resourceName: String?
+    let names: [Name]?
+    let emailAddresses: [Email]?
+}
+
+// MARK: - Tasks
+
+/// `gog tasks …` — Google Tasks.
+struct GogTasks: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "tasks",
+        abstract: "Google Tasks.",
+        subcommands: [TasksLists.self, TasksList.self, TasksAdd.self],
+        aliases: ["task"])
+}
+
+/// `gog tasks lists` — your task lists.
+struct TasksLists: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "lists",
+        abstract: "List your task lists.")
+
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL("https://tasks.googleapis.com/tasks/v1/users/@me/lists")
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let result = try JSONDecoder().decode(TaskListCollection.self, from: body)
+        let lists = result.items ?? []
+        if lists.isEmpty { Shell.bashCurrent.stderr("No task lists\n") }
+        for list in lists {
+            Shell.bashCurrent.stdout("\(list.id ?? "")\t\(list.title ?? "")\n")
+        }
+    }
+}
+
+/// `gog tasks list` — tasks within a list (default `@default`).
+struct TasksList: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list",
+        abstract: "List tasks in a task list.")
+
+    @Option(name: .long, help: "Task list ID (default: @default).")
+    var list: String = "@default"
+    @Option(name: .long, help: "Maximum tasks to return (1–100).")
+    var max: Int = 100
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 100 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 100\n")
+            throw ExitCode(2)
+        }
+        let url = try googleURL(
+            "https://tasks.googleapis.com/tasks/v1/lists", id: "\(list)/tasks",
+            query: [URLQueryItem(name: "maxResults", value: String(max))])
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let result = try JSONDecoder().decode(TaskCollection.self, from: body)
+        let tasks = result.items ?? []
+        if tasks.isEmpty { Shell.bashCurrent.stderr("No tasks\n") }
+        for task in tasks {
+            Shell.bashCurrent.stdout("\(task.id ?? "")\t\(task.status ?? "")\t\(task.title ?? "")\n")
+        }
+    }
+}
+
+/// `gog tasks add <title>` — add a task to a list (default `@default`).
+struct TasksAdd: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add",
+        abstract: "Add a task to a task list.")
+
+    @Argument(help: "Task title.") var title: String
+    @Option(name: .long, help: "Task list ID (default: @default).")
+    var list: String = "@default"
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let payload = try JSONEncoder().encode(["title": title])
+        let url = try googleURL(
+            "https://tasks.googleapis.com/tasks/v1/lists", id: "\(list)/tasks")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let task = try JSONDecoder().decode(TaskItem.self, from: result)
+        Shell.bashCurrent.stdout("added: \(task.id ?? "")\n")
+    }
+}
+
+private struct TaskListCollection: Decodable {
+    struct Item: Decodable { let id: String?; let title: String? }
+    let items: [Item]?
+}
+
+private struct TaskCollection: Decodable {
+    let items: [TaskItem]?
+}
+
+private struct TaskItem: Decodable {
+    let id: String?
+    let title: String?
+    let status: String?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
