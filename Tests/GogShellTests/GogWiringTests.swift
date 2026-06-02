@@ -651,6 +651,72 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("created: evt1"))
     }
 
+    @Test func calendarCalendarsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"primary","summary":"Me","accessRole":"owner","primary":true}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar calendars")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("primary\tMe\towner\tprimary"))
+    }
+
+    @Test func calendarCalendarsRejectsBadMax() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog calendar calendars --max 0")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func calendarFreeBusyRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"calendars":{"primary":{"busy":[{"start":"2026-06-02T10:00:00Z","#
+            + #""end":"2026-06-02T11:00:00Z"}]}}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar freebusy")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("primary\t2026-06-02T10:00:00Z\t2026-06-02T11:00:00Z"))
+    }
+
+    @Test func calendarFreeBusyOrdersCalendarsStably() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Returned out of order; output must be sorted by calendar id.
+        let json = #"{"calendars":{"b@x.com":{"busy":[{"start":"S2","end":"E2"}]},"#
+            + #""a@x.com":{"busy":[{"start":"S1","end":"E1"}]}}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar freebusy --calendar a@x.com --calendar b@x.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("a@x.com\tS1\tE1"))
+        #expect(run.stdout.contains("b@x.com\tS2\tE2"))
+        let a = run.stdout.range(of: "a@x.com")
+        let b = run.stdout.range(of: "b@x.com")
+        #expect(a != nil && b != nil && a!.lowerBound < b!.lowerBound)
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()
