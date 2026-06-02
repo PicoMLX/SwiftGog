@@ -1231,9 +1231,29 @@ struct CalendarFreeBusy: AsyncParsableCommand {
 
     func run() async throws {
         let now = Date()
-        let timeMin = from ?? ISO8601DateFormatter().string(from: now)
-        let timeMax = to ?? ISO8601DateFormatter().string(
-            from: now.addingTimeInterval(86_400))
+        let formatter = ISO8601DateFormatter()
+        let timeMin = from ?? formatter.string(from: now)
+        // Default the window end to 24h after the *start* (not now), so a future
+        // --from with no --to still yields a valid timeMin < timeMax window.
+        // --from / --to are passed through verbatim when given; we only need to
+        // parse the start to compute the default end (and validate it then).
+        let timeMax: String
+        if let to {
+            timeMax = to
+        } else {
+            let startDate: Date
+            if let from {
+                guard let parsed = formatter.date(from: from) else {
+                    Shell.bashCurrent.stderr(
+                        "gog: --from must be RFC3339, e.g. 2026-06-02T10:00:00Z\n")
+                    throw ExitCode(2)
+                }
+                startDate = parsed
+            } else {
+                startDate = now
+            }
+            timeMax = formatter.string(from: startDate.addingTimeInterval(86_400))
+        }
         let ids = calendar.isEmpty ? ["primary"] : calendar
 
         struct Request: Encodable {

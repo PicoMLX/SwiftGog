@@ -27,10 +27,12 @@ private struct MockTransport: GogTransport {
 private final class RecordingTransport: GogTransport, @unchecked Sendable {
     let response: HTTPResponse
     var lastURL: URL?
+    var lastBody: Data?
     init(response: HTTPResponse) { self.response = response }
     func send(method: String, url: URL,
               headers: [String: String], body: Data?) async throws -> HTTPResponse {
         lastURL = url
+        lastBody = body
         return response
     }
 }
@@ -715,6 +717,27 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         let a = run.stdout.range(of: "a@x.com")
         let b = run.stdout.range(of: "b@x.com")
         #expect(a != nil && b != nil && a!.lowerBound < b!.lowerBound)
+    }
+
+    @Test func calendarFreeBusyDefaultsEndToStartPlus24h() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"calendars":{}}"#.utf8)))
+        // Future --from, no --to: timeMax must be 24h after the start, not now,
+        // so the window stays valid (timeMin < timeMax).
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar freebusy --from 2030-01-01T00:00:00Z")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let sent = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(sent.contains(#""timeMin":"2030-01-01T00:00:00Z""#))
+        #expect(sent.contains(#""timeMax":"2030-01-02T00:00:00Z""#))
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {
