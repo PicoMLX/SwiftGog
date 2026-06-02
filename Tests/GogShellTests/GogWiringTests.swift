@@ -1026,6 +1026,80 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("INBOX\tINBOX"))
     }
 
+    @Test func youtubeMyChannelRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"snippet":{"title":"My Channel"},"#
+            + #""statistics":{"subscriberCount":"100","videoCount":"5"}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog youtube my-channel")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("My Channel\tsubscribers=100\tvideos=5"))
+    }
+
+    @Test func youtubeSearchRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":{"videoId":"abc"},"snippet":{"title":"Video"}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog youtube search swift")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("abc\tVideo"))
+    }
+
+    @Test func youtubePlaylistsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"PL1","snippet":{"title":"Faves"}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog youtube playlists")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("PL1\tFaves"))
+    }
+
+    @Test func youtubeMyChannelExitsNonZeroWhenNoChannel() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"items":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog youtube my-channel")
+            }
+        }
+        #expect(run.exitStatus != .success)
+    }
+
+    @Test func youtubeSearchRejectsBadMax() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog youtube search swift --max 0")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
