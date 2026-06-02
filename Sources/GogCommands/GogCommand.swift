@@ -67,8 +67,12 @@ struct GogAuthStatus: AsyncParsableCommand {
         let provider = try GogRuntime.requireCredentials()
         let account = provider.accountHint ?? "unknown"
         if json {
-            Shell.bashCurrent.stdout(
-                "{\"status\":\"ready\",\"account\":\"\(account)\"}\n")
+            // Encode rather than interpolate: accountHint is host-supplied and
+            // may contain quotes/backslashes that would break manual JSON.
+            struct Status: Encodable { let status: String; let account: String }
+            let data = try JSONEncoder().encode(
+                Status(status: "ready", account: account))
+            Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self) + "\n")
         } else {
             Shell.bashCurrent.stdout("ready: authenticated as \(account)\n")
         }
