@@ -45,11 +45,25 @@ public struct GoogleHTTPClient {
             return headers
         }
         do {
-            let token = try await provider.accessToken()
+            let token: String
+            do {
+                token = try await provider.accessToken()
+            } catch {
+                Shell.bashCurrent.stderr(
+                    "gog: (7) re-auth required: could not obtain an access token\n")
+                throw ExitCode(7)
+            }
             var response = try await transport.send(
                 method: method, url: url, headers: headers(token), body: body)
             if response.status == 401 {
-                let refreshed = try await provider.refreshedAccessToken()
+                let refreshed: String
+                do {
+                    refreshed = try await provider.refreshedAccessToken()
+                } catch {
+                    Shell.bashCurrent.stderr(
+                        "gog: (7) re-auth required: token refresh failed\n")
+                    throw ExitCode(7)
+                }
                 response = try await transport.send(
                     method: method, url: url, headers: headers(refreshed), body: body)
             }

@@ -139,13 +139,14 @@ struct DriveLs: AsyncParsableCommand {
             URLQueryItem(name: "fields",
                 value: "nextPageToken,files(id,name,mimeType,modifiedTime,size)"),
         ]
+        var fileQuery = "trashed = false"
         if let parent {
             let escaped = parent
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "'", with: "\\'")
-            query.append(URLQueryItem(
-                name: "q", value: "'\(escaped)' in parents and trashed = false"))
+            fileQuery = "'\(escaped)' in parents and trashed = false"
         }
+        query.append(URLQueryItem(name: "q", value: fileQuery))
         if let page {
             query.append(URLQueryItem(name: "pageToken", value: page))
         }
@@ -330,11 +331,20 @@ struct DriveDownload: AsyncParsableCommand {
     var out: String
 
     func run() async throws {
+        let resolved = Shell.bashCurrent.resolvePath(out)
+        // Fail closed on a denied/out-of-mount destination before spending the
+        // download; an empty placeholder is written, then overwritten on success.
+        do {
+            try await Shell.bashCurrent.fileSystem.writeData(
+                Data(), to: resolved, append: false)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
+            throw ExitCode(23)
+        }
         let url = try googleURL(
             "https://www.googleapis.com/drive/v3/files", id: id,
             query: [URLQueryItem(name: "alt", value: "media")])
         let data = try await GoogleHTTPClient().get(url)
-        let resolved = Shell.bashCurrent.resolvePath(out)
         do {
             try await Shell.bashCurrent.fileSystem.writeData(
                 data, to: resolved, append: false)
@@ -458,6 +468,14 @@ struct GmailSend: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: sending is disabled by host policy\n")
             throw ExitCode(3)
         }
+        // Reject CR/LF in header fields to prevent header injection (e.g. Bcc:).
+        let newlines = CharacterSet(charactersIn: "\r\n")
+        guard to.rangeOfCharacter(from: newlines) == nil,
+              subject.rangeOfCharacter(from: newlines) == nil else {
+            Shell.bashCurrent.stderr(
+                "gog: --to and --subject must not contain newlines\n")
+            throw ExitCode(2)
+        }
         // RFC 2047-encode the subject when it isn't plain ASCII.
         let encodedSubject = subject.allSatisfy(\.isASCII)
             ? subject
@@ -548,12 +566,15 @@ struct CalendarEvents: AsyncParsableCommand {
         }
         var comps = URLComponents(string:
             "https://www.googleapis.com/calendar/v3/calendars/primary/events")!
-        var query = [
+        // Default to upcoming events: orderBy=startTime needs a timeMin to mean
+        // "from now" rather than from the start of the calendar.
+        let timeMin = from ?? ISO8601DateFormatter().string(from: Date())
+        let query = [
             URLQueryItem(name: "maxResults", value: String(max)),
             URLQueryItem(name: "singleEvents", value: "true"),
             URLQueryItem(name: "orderBy", value: "startTime"),
+            URLQueryItem(name: "timeMin", value: timeMin),
         ]
-        if let from { query.append(URLQueryItem(name: "timeMin", value: from)) }
         comps.queryItems = query
 
         let body = try await GoogleHTTPClient().get(comps.url!)
@@ -677,11 +698,17 @@ struct GogAuthStatus: AsyncParsableCommand {
 
     func run() async throws {
         try GogRuntime.requireNetwork()
-        let provider = try GogRuntime.requireCredentials()
-        let account = provider.accountHint ?? "unknown"
+        // Actually reach Google so an expired token or an allow-list that
+        // excludes the API hosts is caught here, not reported as "ready".
+        let url = try googleURL(
+            "https://people.googleapis.com/v1/people/me",
+            query: [URLQueryItem(name: "personFields", value: "names,emailAddresses")])
+        let body = try await GoogleHTTPClient().get(url)
+        let account = (try? JSONDecoder().decode(PeopleMe.self, from: body))?
+            .emailAddresses?.first?.value
+            ?? GogCredentials.current?.accountHint
+            ?? "unknown"
         if json {
-            // Encode rather than interpolate: accountHint is host-supplied and
-            // may contain quotes/backslashes that would break manual JSON.
             struct Status: Encodable { let status: String; let account: String }
             let data = try JSONEncoder().encode(
                 Status(status: "ready", account: account))

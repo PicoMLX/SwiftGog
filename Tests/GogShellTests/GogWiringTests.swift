@@ -65,11 +65,17 @@ private struct MockTransport: GogTransport {
             allowedMethods: [.GET])
         shell.registerGogCommands()
 
-        let run = try await GogCredentials.$current.withValue(
-            StubProvider(token: "secret-token-xyz",
-                         accountHint: "alice@example.com")
-        ) {
-            try await shell.runCapturing("gog auth status --json")
+        // auth status now probes People; the fake transport stands in for Google.
+        let profile = #"{"emailAddresses":[{"value":"alice@example.com"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(profile.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "secret-token-xyz",
+                             accountHint: "alice@example.com")
+            ) {
+                try await shell.runCapturing("gog auth status --json")
+            }
         }
 
         #expect(run.exitStatus == .success)
