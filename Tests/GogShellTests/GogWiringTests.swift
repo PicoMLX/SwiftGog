@@ -460,6 +460,27 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(String(decoding: saved, as: UTF8.self) == "hello")
     }
 
+    @Test func gmailAttachmentsListsNestedParts() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A nested multipart: the inline text part has no attachmentId and is
+        // skipped; the attachment in the nested part must be found via recursion.
+        let json = #"{"payload":{"parts":[{"mimeType":"text/plain","body":{"size":10}},"#
+            + #"{"parts":[{"filename":"report.pdf","mimeType":"application/pdf","#
+            + #""body":{"attachmentId":"att123","size":2048}}]}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail attachments m1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("att123\treport.pdf\tapplication/pdf\t2048"))
+    }
+
     @Test func calendarEventsRendersRows() async throws {
         let shell = Shell()
         shell.registerGogCommands()
