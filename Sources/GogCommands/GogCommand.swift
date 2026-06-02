@@ -549,7 +549,8 @@ struct GogGmail: AsyncParsableCommand {
         subcommands: [
             GmailMessages.self, GmailGet.self, GmailSend.self, GmailLabels.self,
             GmailDrafts.self, GmailDraft.self,
-            GmailThreads.self, GmailThreadGet.self, GmailAttachment.self,
+            GmailThreads.self, GmailThreadGet.self,
+            GmailAttachments.self, GmailAttachment.self,
         ],
         aliases: ["mail", "email"])
 }
@@ -888,6 +889,63 @@ struct GmailThreadGet: AsyncParsableCommand {
     }
 }
 
+/// `gog gmail attachments <messageId>` — list a message's attachments so their
+/// IDs can be fed to `gog gmail attachment`. Walks the full message payload
+/// (recursively) for parts that carry a filename; the bytes are then fetched
+/// via `body.attachmentId`, or are inline in `body.data` for small attachments.
+struct GmailAttachments: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "attachments",
+        abstract: "List a message's attachments (id, filename, type, size).")
+
+    @Argument(help: "Gmail message ID.") var messageId: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit the attachment list as JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages", id: messageId,
+            query: [URLQueryItem(name: "format", value: "full")])
+        let body = try await GoogleHTTPClient().get(url)
+        let message = try JSONDecoder().decode(GmailFullMessage.self, from: body)
+
+        // Collect only the attachment parts. We never forward the raw message:
+        // a `format=full` response also carries headers and inline body data,
+        // which this discovery command does not advertise (and shouldn't leak).
+        var attachments: [GmailAttachmentInfo] = []
+        func walk(_ part: GmailFullMessage.Part?) {
+            guard let part else { return }
+            // An attachment is identified by a non-empty filename. Message body
+            // parts have none — even when Gmail stores a large body under its
+            // own attachmentId — so keying on filename both excludes those and
+            // surfaces small attachments whose bytes are inline in body.data
+            // (attachmentId then empty).
+            if let filename = part.filename, !filename.isEmpty {
+                attachments.append(GmailAttachmentInfo(
+                    attachmentId: part.body?.attachmentId ?? "",
+                    filename: filename,
+                    mimeType: part.mimeType ?? "",
+                    size: part.body?.size))
+            }
+            for child in part.parts ?? [] { walk(child) }
+        }
+        walk(message.payload)
+
+        if json {
+            let encoded = try JSONEncoder().encode(["attachments": attachments])
+            Shell.bashCurrent.stdout(String(decoding: encoded, as: UTF8.self) + "\n")
+            return
+        }
+        if attachments.isEmpty { Shell.bashCurrent.stderr("No attachments\n") }
+        for att in attachments {
+            let size = att.size.map(String.init) ?? ""
+            Shell.bashCurrent.stdout(
+                "\(att.attachmentId)\t\(tsvEscaped(att.filename))"
+                    + "\t\(tsvEscaped(att.mimeType))\t\(size)\n")
+        }
+    }
+}
+
 /// `gog gmail attachment <messageId> <attachmentId> --out <path>` — download a
 /// message attachment into the sandbox.
 struct GmailAttachment: AsyncParsableCommand {
@@ -897,7 +955,7 @@ struct GmailAttachment: AsyncParsableCommand {
         aliases: ["attach"])
 
     @Argument(help: "Gmail message ID.") var messageId: String
-    @Argument(help: "Attachment ID (from the message's MIME parts).")
+    @Argument(help: "Attachment ID (see `gmail attachments <messageId>`).")
     var attachmentId: String
     @Option(name: [.customShort("o"), .long],
             help: "Destination path inside the sandbox.")
@@ -952,6 +1010,24 @@ private struct GmailThread: Decodable {
     let messages: [GmailMessage]?
 }
 private struct GmailAttachmentBody: Decodable { let size: Int?; let data: String? }
+/// The slice of an attachment surfaced by `gmail attachments` (also the `--json`
+/// shape) — deliberately excludes headers and inline body content.
+private struct GmailAttachmentInfo: Encodable {
+    let attachmentId: String
+    let filename: String
+    let mimeType: String
+    let size: Int?
+}
+private struct GmailFullMessage: Decodable {
+    struct Part: Decodable {
+        struct Body: Decodable { let attachmentId: String?; let size: Int? }
+        let filename: String?
+        let mimeType: String?
+        let body: Body?
+        let parts: [Part]?
+    }
+    let payload: Part?
+}
 
 /// `gog calendar …` — Google Calendar group (primary calendar).
 struct GogCalendar: AsyncParsableCommand {

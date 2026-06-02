@@ -78,7 +78,8 @@ gog gmail threads -q 'newer_than:7d' --json   # list threads
 gog gmail thread <threadId> --json            # a thread's messages (From/Subject)
 gog gmail drafts --json                        # list drafts
 gog gmail draft --to user@example.com --subject 'Hi' --body 'Hello'  # compose (does NOT send)
-gog gmail attachment <messageId> <attachmentId> --out /gog/file.pdf  # download to sandbox
+gog gmail attachments <messageId> --json   # discover attachment IDs (id, filename, type, size)
+gog gmail attachment <messageId> <attachmentId> --out /gog/file.pdf  # then download to sandbox
 ```
 
 Drop `--dry-run` to actually send (subject to the host send policy). `gog gmail
