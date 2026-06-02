@@ -481,6 +481,28 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("att123\treport.pdf\tapplication/pdf\t2048"))
     }
 
+    @Test func gmailAttachmentsJSONOmitsMessageBody() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The inline text part carries body.data ("c2VjcmV0" = "secret"); --json
+        // must emit only the attachment list, never the raw message body.
+        let json = #"{"payload":{"parts":[{"mimeType":"text/plain","body":{"data":"c2VjcmV0"}},"#
+            + #"{"filename":"a.pdf","mimeType":"application/pdf","#
+            + #""body":{"attachmentId":"att1","size":10}}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail attachments m1 --json")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("att1"))
+        #expect(!run.stdout.contains("c2VjcmV0"))   // inline body data not leaked
+    }
+
     @Test func calendarEventsRendersRows() async throws {
         let shell = Shell()
         shell.registerGogCommands()
