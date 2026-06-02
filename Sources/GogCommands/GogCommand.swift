@@ -38,7 +38,7 @@ public struct GogCommand: AsyncParsableCommand {
             GogVersion.self, GogMe.self,
             GogDrive.self, GogGmail.self, GogCalendar.self,
             GogContacts.self, GogTasks.self, GogDocs.self, GogSheets.self,
-            GogChat.self, GogSlides.self, GogForms.self, GogAuth.self,
+            GogChat.self, GogSlides.self, GogForms.self, GogYouTube.self, GogAuth.self,
             // Top-level aliases (mirrors gogcli's `gog ls` / `gog send`).
             DriveLs.self, GmailSend.self,
         ])
@@ -1501,6 +1501,155 @@ struct GmailLabels: AsyncParsableCommand {
 
 private struct LabelList: Decodable { let labels: [Label]? }
 private struct Label: Decodable { let id: String?; let name: String? }
+
+// MARK: - YouTube
+
+/// `gog youtube …` — YouTube Data API.
+struct GogYouTube: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "youtube",
+        abstract: "YouTube Data API.",
+        subcommands: [YouTubeMyChannel.self, YouTubeSearch.self, YouTubePlaylists.self],
+        aliases: ["yt"])
+}
+
+/// `gog youtube my-channel` — your channel's title and stats.
+struct YouTubeMyChannel: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "my-channel",
+        abstract: "Show your channel's title and stats.",
+        aliases: ["channel"])
+
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://youtube.googleapis.com/youtube/v3/channels",
+            query: [
+                URLQueryItem(name: "part", value: "snippet,statistics"),
+                URLQueryItem(name: "mine", value: "true"),
+            ])
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(YTChannelList.self, from: body)
+        guard let channel = list.items?.first else {
+            Shell.bashCurrent.stderr("No channel\n")
+            return
+        }
+        let title = channel.snippet?.title ?? ""
+        let subscribers = channel.statistics?.subscriberCount ?? "0"
+        let videos = channel.statistics?.videoCount ?? "0"
+        Shell.bashCurrent.stdout(
+            "\(tsvEscaped(title))\tsubscribers=\(subscribers)\tvideos=\(videos)\n")
+    }
+}
+
+/// `gog youtube search <query>` — search for videos.
+struct YouTubeSearch: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "search",
+        abstract: "Search for videos.")
+
+    @Argument(help: "Search query.") var query: String
+    @Option(name: .long, help: "Maximum results to return (1–50).") var max: Int = 25
+    @Option(name: .long, help: "Page token from a previous search.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 50 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 50\n")
+            throw ExitCode(2)
+        }
+        var items = [
+            URLQueryItem(name: "part", value: "snippet"),
+            URLQueryItem(name: "type", value: "video"),
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "maxResults", value: String(max)),
+        ]
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://youtube.googleapis.com/youtube/v3/search", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(YTSearchList.self, from: body)
+        let results = list.items ?? []
+        if results.isEmpty { Shell.bashCurrent.stderr("No results\n") }
+        for item in results {
+            Shell.bashCurrent.stdout(
+                "\(item.id?.videoId ?? "")\t\(tsvEscaped(item.snippet?.title ?? ""))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog youtube playlists` — your playlists.
+struct YouTubePlaylists: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "playlists",
+        abstract: "List your playlists.")
+
+    @Option(name: .long, help: "Maximum playlists to return (1–50).") var max: Int = 25
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 50 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 50\n")
+            throw ExitCode(2)
+        }
+        var items = [
+            URLQueryItem(name: "part", value: "snippet"),
+            URLQueryItem(name: "mine", value: "true"),
+            URLQueryItem(name: "maxResults", value: String(max)),
+        ]
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://youtube.googleapis.com/youtube/v3/playlists", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(YTPlaylistList.self, from: body)
+        let playlists = list.items ?? []
+        if playlists.isEmpty { Shell.bashCurrent.stderr("No playlists\n") }
+        for playlist in playlists {
+            Shell.bashCurrent.stdout(
+                "\(playlist.id ?? "")\t\(tsvEscaped(playlist.snippet?.title ?? ""))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+private struct YTSnippet: Decodable { let title: String?; let channelTitle: String? }
+private struct YTChannelList: Decodable { let items: [YTChannel]? }
+private struct YTChannel: Decodable {
+    struct Stats: Decodable { let subscriberCount: String?; let videoCount: String? }
+    let id: String?
+    let snippet: YTSnippet?
+    let statistics: Stats?
+}
+private struct YTSearchList: Decodable { let items: [YTSearchItem]?; let nextPageToken: String? }
+private struct YTSearchItem: Decodable {
+    struct ResourceId: Decodable { let videoId: String? }
+    let id: ResourceId?
+    let snippet: YTSnippet?
+}
+private struct YTPlaylistList: Decodable { let items: [YTPlaylist]?; let nextPageToken: String? }
+private struct YTPlaylist: Decodable { let id: String?; let snippet: YTSnippet? }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
 /// MVP leaf is `status`.
