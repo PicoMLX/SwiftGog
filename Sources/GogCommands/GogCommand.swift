@@ -1658,25 +1658,28 @@ private struct YTSearchItem: Decodable {
 private struct YTPlaylistList: Decodable { let items: [YTPlaylist]?; let nextPageToken: String? }
 private struct YTPlaylist: Decodable { let id: String?; let snippet: YTSnippet? }
 
-// MARK: - Admin (Directory)
+// MARK: - Admin (Directory + Reports)
 
-/// `gog admin …` — Google Workspace **Admin SDK Directory** API (read-only).
+/// `gog admin …` — Google Workspace **Admin SDK** (Directory + Reports),
+/// read-only.
 ///
-/// These commands read the directory of the *authenticated admin's* Workspace
-/// account. The host-injected token must carry admin Directory scopes (e.g.
-/// `admin.directory.user.readonly`, `admin.directory.group.readonly`) and
-/// belong to a user with admin privileges; otherwise Google replies 403 and
-/// `gog` surfaces that message. `gog` performs no domain-wide delegation
-/// itself — scope and any impersonation are the host's responsibility (see
-/// PLAN.md). Listings default to `customer=my_customer`, i.e. the admin's own
-/// Workspace customer.
+/// These commands read the directory and audit log of the *authenticated
+/// admin's* Workspace account. The host-injected token must carry the matching
+/// admin scopes (e.g. `admin.directory.user.readonly` for the directory,
+/// `admin.reports.audit.readonly` for `activities`) and belong to a user with
+/// admin privileges; otherwise Google replies 403 and `gog` surfaces that
+/// message. `gog` performs no domain-wide delegation itself — scope and any
+/// impersonation are the host's responsibility (see PLAN.md). Directory
+/// listings default to `customer=my_customer`, i.e. the admin's own Workspace
+/// customer.
 struct GogAdmin: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "admin",
-        abstract: "Admin SDK Directory (users, groups, members) — read-only.",
+        abstract: "Admin SDK Directory + Reports — read-only.",
         subcommands: [
             AdminUsers.self, AdminUser.self,
             AdminGroups.self, AdminGroup.self, AdminMembers.self,
+            AdminActivities.self,
         ],
         aliases: ["directory"])
 }
@@ -1913,6 +1916,73 @@ private struct DirMember: Decodable {
     let role: String?
     let type: String?
     let status: String?
+}
+
+/// `gog admin activities <application>` — Admin SDK **Reports** audit log for
+/// one application (e.g. `login`, `admin`, `drive`, `token`, `groups`).
+/// Defaults to all users; pass `--user` for a single account.
+struct AdminActivities: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "activities",
+        abstract: "Audit-log activities for an application (login, admin, drive, …).",
+        aliases: ["activity"])
+
+    @Argument(help: "Application: login, admin, drive, token, groups, calendar, ….")
+    var application: String
+    @Option(name: .long, help: "User key (email/id), or 'all'.") var user: String = "all"
+    @Option(name: .long, help: "Filter to a single event name, e.g. 'login_success'.")
+    var event: String?
+    @Option(name: .long, help: "Maximum activities to return (1–1000).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+        var items = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let event { items.append(URLQueryItem(name: "eventName", value: event)) }
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        // userKey and applicationName are both single path segments.
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/reports/v1/activity/users/"
+                + "\(pathSegment(user))/applications/\(pathSegment(application))",
+            query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(ReportActivityList.self, from: body)
+        let activities = list.items ?? []
+        if activities.isEmpty { Shell.bashCurrent.stderr("No activities\n") }
+        for activity in activities {
+            let time = activity.id?.time ?? ""
+            let actor = activity.actor?.email ?? activity.actor?.profileId ?? ""
+            let events = (activity.events ?? [])
+                .compactMap(\.name).joined(separator: ",")
+            Shell.bashCurrent.stdout(
+                "\(time)\t\(tsvEscaped(actor))\t\(tsvEscaped(events))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+private struct ReportActivityList: Decodable {
+    let items: [ReportActivity]?
+    let nextPageToken: String?
+}
+private struct ReportActivity: Decodable {
+    struct ID: Decodable { let time: String?; let applicationName: String? }
+    struct Actor: Decodable { let email: String?; let profileId: String? }
+    struct Event: Decodable { let type: String?; let name: String? }
+    let id: ID?
+    let actor: Actor?
+    let events: [Event]?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only

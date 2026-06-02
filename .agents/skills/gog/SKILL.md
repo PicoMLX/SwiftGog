@@ -143,11 +143,12 @@ gog youtube search 'swift concurrency' --max 10 --json
 gog youtube playlists --json
 ```
 
-## Admin (Directory)
+## Admin (Directory + Reports)
 
-Read-only Admin SDK Directory. Requires a host token with admin Directory
-scopes belonging to a Workspace admin; otherwise Google returns 403. Listings
-default to the admin's own customer.
+Read-only Admin SDK. Requires a host token with the matching admin scopes
+(Directory for users/groups, `admin.reports.audit.readonly` for `activities`)
+belonging to a Workspace admin; otherwise Google returns 403. Directory
+listings default to the admin's own customer.
 
 ```bash
 gog admin users --json                    # directory users (--domain / --query to narrow)
@@ -155,6 +156,7 @@ gog admin user alice@example.com --json   # one user by email or id
 gog admin groups --json                   # groups (--user <email> for a user's groups)
 gog admin group eng@example.com --json    # one group
 gog admin members eng@example.com --json  # a group's members (--roles OWNER,MANAGER)
+gog admin activities login --json         # audit log (admin/drive/token/…; --user, --event)
 ```
 
 ## Discovery
@@ -171,5 +173,5 @@ gog version
 - With `--json` the output is structured JSON; otherwise it is a compact
   human / TSV form (id, then key fields, tab-separated).
 - Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks, Docs, Sheets,
-  Chat, Slides, Forms, YouTube, Admin (Directory). More services are planned —
+  Chat, Slides, Forms, YouTube, Admin (Directory + Reports). More services are planned —
   see `PLAN.md`.
