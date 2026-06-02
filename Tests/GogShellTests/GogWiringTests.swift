@@ -1257,6 +1257,51 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(!run.stdout.contains("A\tB"))
     }
 
+    @Test func adminActivitiesRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":{"time":"2026-06-01T00:00:00Z"},"#
+            + #""actor":{"email":"alice@x.com"},"#
+            + #""events":[{"name":"login_success"}]}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin activities login")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("2026-06-01T00:00:00Z\talice@x.com\tlogin_success"))
+    }
+
+    @Test func adminActivitiesDefaultsToAllUsersAndPassesEvent() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"items":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog admin activities login --event login_success")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("/activity/users/all/applications/login"))
+        #expect(url.contains("eventName=login_success"))
+    }
+
+    @Test func adminActivitiesRejectsBadMax() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog admin activities login --max 0")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
