@@ -167,7 +167,8 @@ networkConfig = NetworkConfig(
     allowedURLPrefixes: [
         AllowedURLEntry("https://www.googleapis.com/"),    // Drive v3, Calendar v3
         AllowedURLEntry("https://gmail.googleapis.com/"),  // Gmail v1
-        AllowedURLEntry("https://people.googleapis.com/"), // identity: me / whoami
+        AllowedURLEntry("https://people.googleapis.com/"), // identity (me) + contacts
+        AllowedURLEntry("https://tasks.googleapis.com/"),  // Tasks
     ],
     allowedMethods: [.GET, .POST, .PATCH, .PUT, .DELETE])
 ```
