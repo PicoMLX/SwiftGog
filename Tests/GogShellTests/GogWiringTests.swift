@@ -336,6 +336,52 @@ private struct MockTransport: GogTransport {
         #expect(run.stdout.contains("sent: sent123"))
     }
 
+    @Test func calendarEventsRendersRows() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"e1","summary":"Standup","#
+            + #""start":{"dateTime":"2026-06-02T10:00:00Z"}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar events")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("e1\t2026-06-02T10:00:00Z\tStandup"))
+    }
+
+    @Test func calendarCreateDryRunDoesNotCreate() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog calendar create --summary Standup"
+            + " --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Standup"))
+    }
+
+    @Test func calendarCreatePostsId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"evt1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar create --summary Standup"
+                    + " --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("created: evt1"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

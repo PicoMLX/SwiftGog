@@ -12,7 +12,7 @@ public struct GogCommand: AsyncParsableCommand {
         commandName: "gog",
         abstract: "Google Workspace CLI (sandboxed, SwiftBash-native).",
         version: GogVersionInfo.version,
-        subcommands: [GogVersion.self, GogMe.self, GogDrive.self, GogGmail.self, GogAuth.self])
+        subcommands: [GogVersion.self, GogMe.self, GogDrive.self, GogGmail.self, GogCalendar.self, GogAuth.self])
 
     public init() {}
 }
@@ -419,6 +419,143 @@ private struct GmailMessage: Decodable {
     let id: String?
     let snippet: String?
     let payload: Payload?
+}
+
+/// `gog calendar …` — Google Calendar group (primary calendar).
+struct GogCalendar: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "calendar",
+        abstract: "Google Calendar.",
+        subcommands: [CalendarEvents.self, CalendarGet.self, CalendarCreate.self],
+        aliases: ["cal"])
+}
+
+/// `gog calendar events` — list upcoming events on the primary calendar.
+struct CalendarEvents: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "events",
+        abstract: "List events on the primary calendar.",
+        aliases: ["list"])
+
+    @Option(name: .long, help: "Maximum events to return (1–2500).")
+    var max: Int = 100
+    @Option(name: .long, help: "Earliest start time (RFC3339).")
+    var from: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 2500 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 2500\n")
+            throw ExitCode(2)
+        }
+        var comps = URLComponents(string:
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events")!
+        var query = [
+            URLQueryItem(name: "maxResults", value: String(max)),
+            URLQueryItem(name: "singleEvents", value: "true"),
+            URLQueryItem(name: "orderBy", value: "startTime"),
+        ]
+        if let from { query.append(URLQueryItem(name: "timeMin", value: from)) }
+        comps.queryItems = query
+
+        let body = try await GoogleHTTPClient().get(comps.url!)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(CalEventList.self, from: body)
+        let items = list.items ?? []
+        if items.isEmpty { Shell.bashCurrent.stderr("No events\n") }
+        for event in items {
+            Shell.bashCurrent.stdout(
+                "\(event.id ?? "")\t\(event.when)\t\(event.summary ?? "")\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog calendar get <id>` — one event.
+struct CalendarGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Show a calendar event.")
+
+    @Argument(help: "Event ID.") var id: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = URL(string:
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events/\(id)")!
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let event = try JSONDecoder().decode(CalEvent.self, from: body)
+        Shell.bashCurrent.stdout(
+            "\(event.id ?? "")\t\(event.when)\t\(event.summary ?? "")\n")
+    }
+}
+
+/// `gog calendar create --summary … --start … --end …` — create a timed event.
+struct CalendarCreate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a timed event on the primary calendar.")
+
+    @Option(name: .long, help: "Event title.") var summary: String
+    @Option(name: .long, help: "Start time (RFC3339, e.g. 2026-06-02T10:00:00Z).")
+    var start: String
+    @Option(name: .long, help: "End time (RFC3339).") var end: String
+    @Flag(name: .long, help: "Build the request but do not create the event.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        struct NewEvent: Encodable {
+            struct When: Encodable { let dateTime: String }
+            let summary: String
+            let start: When
+            let end: When
+        }
+        let payload = try JSONEncoder().encode(NewEvent(
+            summary: summary, start: .init(dateTime: start), end: .init(dateTime: end)))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = URL(string:
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events")!
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let event = try JSONDecoder().decode(CalEvent.self, from: result)
+        Shell.bashCurrent.stdout("created: \(event.id ?? "")\n")
+    }
+}
+
+private struct CalEventList: Decodable {
+    let items: [CalEvent]?
+    let nextPageToken: String?
+}
+
+private struct CalEvent: Decodable {
+    struct When: Decodable { let dateTime: String?; let date: String? }
+    let id: String?
+    let summary: String?
+    let start: When?
+    let end: When?
+
+    /// Best-effort start label: dateTime, else all-day date, else empty.
+    var when: String { start?.dateTime ?? start?.date ?? "" }
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
