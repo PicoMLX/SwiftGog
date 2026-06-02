@@ -258,6 +258,43 @@ private struct MockTransport: GogTransport {
         #expect(run.exitStatus != .success)
     }
 
+    @Test func gmailMessagesRendersIds() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"messages":[{"id":"m1","threadId":"t1"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail messages")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("m1\tt1"))
+    }
+
+    @Test func gmailGetRendersHeaders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"id":"m1","snippet":"hi there","payload":{"headers":["#
+            + #"{"name":"From","value":"a@b.com"},"#
+            + #"{"name":"Subject","value":"Hello"}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail get m1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Subject: Hello"))
+        #expect(run.stdout.contains("From: a@b.com"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

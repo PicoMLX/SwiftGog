@@ -12,7 +12,7 @@ public struct GogCommand: AsyncParsableCommand {
         commandName: "gog",
         abstract: "Google Workspace CLI (sandboxed, SwiftBash-native).",
         version: GogVersionInfo.version,
-        subcommands: [GogVersion.self, GogMe.self, GogDrive.self, GogAuth.self])
+        subcommands: [GogVersion.self, GogMe.self, GogDrive.self, GogGmail.self, GogAuth.self])
 
     public init() {}
 }
@@ -251,6 +251,112 @@ struct DriveDownload: AsyncParsableCommand {
         }
         Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
     }
+}
+
+/// `gog gmail …` — Gmail group (read commands; `send` lands separately).
+struct GogGmail: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "gmail",
+        abstract: "Gmail.",
+        subcommands: [GmailMessages.self, GmailGet.self],
+        aliases: ["mail", "email"])
+}
+
+/// `gog gmail messages` — list message IDs (optionally filtered by a query).
+struct GmailMessages: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "messages",
+        abstract: "List message IDs.",
+        aliases: ["list"])
+
+    @Option(name: [.customShort("q"), .long], help: "Gmail search query.")
+    var query: String?
+    @Option(name: .long, help: "Maximum messages to return (1–500).")
+    var max: Int = 100
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 500 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 500\n")
+            throw ExitCode(2)
+        }
+        var comps = URLComponents(
+            string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
+        var query = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let q = self.query { query.append(URLQueryItem(name: "q", value: q)) }
+        comps.queryItems = query
+
+        let body = try await GoogleHTTPClient().get(comps.url!)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(GmailMessageList.self, from: body)
+        let messages = list.messages ?? []
+        if messages.isEmpty { Shell.bashCurrent.stderr("No messages\n") }
+        for message in messages {
+            Shell.bashCurrent.stdout("\(message.id ?? "")\t\(message.threadId ?? "")\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog gmail get <id>` — a message's key headers and snippet.
+struct GmailGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Show a message's headers and snippet.")
+
+    @Argument(help: "Gmail message ID.") var id: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        var comps = URLComponents(
+            string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)")!
+        comps.queryItems = [
+            URLQueryItem(name: "format", value: "metadata"),
+            URLQueryItem(name: "metadataHeaders", value: "From"),
+            URLQueryItem(name: "metadataHeaders", value: "Subject"),
+            URLQueryItem(name: "metadataHeaders", value: "Date"),
+        ]
+        let body = try await GoogleHTTPClient().get(comps.url!)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let message = try JSONDecoder().decode(GmailMessage.self, from: body)
+        let headers = message.payload?.headers ?? []
+        func header(_ name: String) -> String {
+            headers.first { $0.name?.caseInsensitiveCompare(name) == .orderedSame }?
+                .value ?? ""
+        }
+        Shell.bashCurrent.stdout("From: \(header("From"))\n")
+        Shell.bashCurrent.stdout("Subject: \(header("Subject"))\n")
+        Shell.bashCurrent.stdout("Date: \(header("Date"))\n")
+        if let snippet = message.snippet, !snippet.isEmpty {
+            Shell.bashCurrent.stdout("\n\(snippet)\n")
+        }
+    }
+}
+
+private struct GmailMessageList: Decodable {
+    struct Ref: Decodable { let id: String?; let threadId: String? }
+    let messages: [Ref]?
+    let nextPageToken: String?
+}
+
+private struct GmailMessage: Decodable {
+    struct Payload: Decodable {
+        struct Header: Decodable { let name: String?; let value: String? }
+        let headers: [Header]?
+    }
+    let id: String?
+    let snippet: String?
+    let payload: Payload?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
