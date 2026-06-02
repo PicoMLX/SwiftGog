@@ -97,6 +97,21 @@ gog tasks list --list <listId> --json
 gog tasks add 'Buy milk' --list <listId>
 ```
 
+## Docs
+
+```bash
+gog docs cat <documentId>                 # prints the doc's text
+gog docs cat <documentId> --format markdown
+gog docs cat <documentId> --out /gog/doc.md
+```
+
+## Sheets
+
+```bash
+gog sheets get <spreadsheetId> 'Sheet1!A1:D20' --json
+gog sheets update <spreadsheetId> 'Sheet1!A1' --values-json '[["hello","world"]]' --dry-run
+```
+
 ## Discovery
 
 ```bash
@@ -110,5 +125,5 @@ gog version
 
 - With `--json` the output is structured JSON; otherwise it is a compact
   human / TSV form (id, then key fields, tab-separated).
-- Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks. More services
-  (Docs, Sheets, …) are planned — see `PLAN.md`.
+- Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks, Docs, Sheets.
+  More services are planned — see `PLAN.md`.

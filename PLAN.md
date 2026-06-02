@@ -169,6 +169,7 @@ networkConfig = NetworkConfig(
         AllowedURLEntry("https://gmail.googleapis.com/"),  // Gmail v1
         AllowedURLEntry("https://people.googleapis.com/"), // identity (me) + contacts
         AllowedURLEntry("https://tasks.googleapis.com/"),  // Tasks
+        AllowedURLEntry("https://sheets.googleapis.com/"), // Sheets (Docs export via www)
     ],
     allowedMethods: [.GET, .POST, .PATCH, .PUT, .DELETE])
 ```

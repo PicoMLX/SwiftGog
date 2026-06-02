@@ -31,6 +31,12 @@ public struct GoogleHTTPClient {
         try await perform(method: "POST", url: url, body: body, contentType: contentType)
     }
 
+    /// Authenticated `PUT` with a JSON body.
+    public func put(_ url: URL, jsonBody: Data) async throws -> Data {
+        try await perform(method: "PUT", url: url, body: jsonBody,
+                          contentType: "application/json")
+    }
+
     /// Shared flow: bearer token, one `401` → refresh retry, then status
     /// mapping. Returns the body, or throws an `ExitCode` (7 = no creds /
     /// re-auth required; 1 = other HTTP ≥ 400) after writing a diagnostic to

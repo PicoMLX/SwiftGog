@@ -37,7 +37,7 @@ public struct GogCommand: AsyncParsableCommand {
         subcommands: [
             GogVersion.self, GogMe.self,
             GogDrive.self, GogGmail.self, GogCalendar.self,
-            GogContacts.self, GogTasks.self, GogAuth.self,
+            GogContacts.self, GogTasks.self, GogDocs.self, GogSheets.self, GogAuth.self,
             // Top-level aliases (mirrors gogcli's `gog ls` / `gog send`).
             DriveLs.self, GmailSend.self,
         ])
@@ -338,17 +338,9 @@ struct DriveDownload: AsyncParsableCommand {
 
     func run() async throws {
         let resolved = Shell.bashCurrent.resolvePath(out)
-        // Validate writability via a sibling probe — without truncating an
-        // existing destination — so a later download failure can't destroy it.
-        let probe = resolved + ".gog-precheck"
-        do {
-            try await Shell.bashCurrent.fileSystem.writeData(
-                Data(), to: probe, append: false)
-            try? await Shell.bashCurrent.fileSystem.remove(probe, recursive: false)
-        } catch {
-            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
-            throw ExitCode(23)
-        }
+        // Validate the destination (non-destructively) before spending the
+        // download, so an out-of-mount path fails closed without a fetch.
+        try await ensureWritableDestination(resolved, label: out)
         let url = try googleURL(
             "https://www.googleapis.com/drive/v3/files", id: id,
             query: [URLQueryItem(name: "alt", value: "media")])
@@ -916,6 +908,288 @@ private struct TaskItem: Decodable {
     let id: String?
     let title: String?
     let status: String?
+}
+
+// MARK: - Docs (export via Drive)
+
+/// `gog docs …` — Google Docs, read by exporting through Drive.
+struct GogDocs: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "docs",
+        abstract: "Google Docs (export via Drive).",
+        subcommands: [DocsCat.self],
+        aliases: ["doc"])
+}
+
+/// `gog docs cat <documentId>` — export a Doc's contents as text or markdown.
+struct DocsCat: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "cat",
+        abstract: "Export a Doc's contents (via Drive export).")
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Option(name: .long, help: "Export format: text or markdown.")
+    var format: String = "text"
+    @Option(name: [.customShort("o"), .long],
+            help: "Write to a sandbox path instead of stdout.")
+    var out: String?
+
+    func run() async throws {
+        let mimeType: String
+        switch format {
+        case "text": mimeType = "text/plain"
+        case "markdown", "md": mimeType = "text/markdown"
+        default:
+            Shell.bashCurrent.stderr("gog: --format must be text or markdown\n")
+            throw ExitCode(2)
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files",
+            id: "\(documentId)/export",
+            query: [URLQueryItem(name: "mimeType", value: mimeType)])
+        guard let out else {
+            let data = try await GoogleHTTPClient().get(url)
+            Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self))
+            return
+        }
+        // Validate the destination (non-destructively) before exporting,
+        // mirroring drive download.
+        let path = Shell.bashCurrent.resolvePath(out)
+        try await ensureWritableDestination(path, label: out)
+        let data = try await GoogleHTTPClient().get(url)
+        do {
+            try await Shell.bashCurrent.fileSystem.writeData(data, to: path, append: false)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
+            throw ExitCode(23)
+        }
+        Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
+}
+
+// MARK: - Sheets
+
+/// `gog sheets …` — Google Sheets cell values.
+struct GogSheets: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "sheets",
+        abstract: "Google Sheets.",
+        subcommands: [SheetsGet.self, SheetsUpdate.self],
+        aliases: ["sheet"])
+}
+
+/// Build the Sheets `…/{id}/values/{range}` URL, percent-encoding the
+/// spreadsheet id and range as single path segments — so a `/` in a sheet name
+/// becomes %2F rather than a path separator that would break the request.
+private func sheetsValuesURL(spreadsheetId: String, range: String,
+                             query: [URLQueryItem] = []) throws -> URL {
+    let segment = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
+    let id = spreadsheetId.addingPercentEncoding(withAllowedCharacters: segment) ?? spreadsheetId
+    let encodedRange = range.addingPercentEncoding(withAllowedCharacters: segment) ?? range
+    return try googleURL(
+        "https://sheets.googleapis.com/v4/spreadsheets/\(id)/values/\(encodedRange)",
+        query: query)
+}
+
+/// Column count for an A1 range like "Sheet1!A1:C10" → 3, or nil for a single
+/// cell or an unbounded range (where padding can't be inferred).
+private func sheetsRangeDimensions(_ range: String?) -> (rows: Int?, cols: Int?)? {
+    guard let range else { return nil }
+    let a1 = range.split(separator: "!").last.map(String.init) ?? range
+    let bounds = a1.split(separator: ":", maxSplits: 1).map(String.init)
+    guard bounds.count == 2 else { return nil }
+    func columnIndex(_ cell: String) -> Int? {
+        let letters = cell.prefix { $0.isLetter }.uppercased()
+        guard !letters.isEmpty else { return nil }
+        var index = 0
+        for ch in letters {
+            guard let v = ch.asciiValue, (65...90).contains(v) else { return nil }
+            index = index * 26 + Int(v - 64)
+        }
+        return index
+    }
+    func rowNumber(_ cell: String) -> Int? { Int(cell.drop { $0.isLetter }) }
+    let cols: Int? = {
+        guard let s = columnIndex(bounds[0]), let e = columnIndex(bounds[1]) else { return nil }
+        return max(1, e - s + 1)
+    }()
+    let rows: Int? = {
+        guard let s = rowNumber(bounds[0]), let e = rowNumber(bounds[1]) else { return nil }
+        return max(1, e - s + 1)
+    }()
+    return (rows: rows, cols: cols)
+}
+
+/// Non-destructive writability check for a destination: confirms the parent
+/// directory is reachable inside a mount (so out-of-mount paths fail closed
+/// before any network fetch) without creating or deleting any files — avoids
+/// clobbering an unrelated sibling that a fixed probe name might collide with.
+private func ensureWritableDestination(_ resolvedPath: String, label: String) async throws {
+    let parent = (resolvedPath as NSString).deletingLastPathComponent
+    let directory = parent.isEmpty ? "/" : parent
+    let metadata = (try? await Shell.bashCurrent.fileSystem.metadata(directory)).flatMap { $0 }
+    if metadata == nil {
+        Shell.bashCurrent.stderr(
+            "gog: cannot write \(label): no such directory in the sandbox\n")
+        throw ExitCode(23)
+    }
+}
+
+/// `gog sheets get <spreadsheetId> <range>` — read a range of values.
+struct SheetsGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Read cell values from an A1 range.")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range, e.g. Sheet1!A1:D20.") var range: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try sheetsValuesURL(spreadsheetId: spreadsheetId, range: range)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let result = try JSONDecoder().decode(ValueRange.self, from: body)
+        let rows = result.values ?? []
+        if rows.isEmpty {
+            Shell.bashCurrent.stderr("No values\n")
+            return
+        }
+        // Sheets omits trailing empty rows/columns; pad to the requested range
+        // dimensions (or the widest returned row) so the TSV keeps a consistent
+        // shape. (`--json` stays lossless.)
+        let dimensions = sheetsRangeDimensions(result.range)
+        let width = dimensions?.cols ?? (rows.map(\.count).max() ?? 0)
+        let height = max(dimensions?.rows ?? rows.count, rows.count)
+        for index in 0..<height {
+            // Escape delimiters so a cell containing a tab/newline can't break
+            // the one-row-per-record TSV shape.
+            var cells = (index < rows.count ? rows[index] : []).map { cell in
+                cell.text
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\t", with: "\\t")
+                    .replacingOccurrences(of: "\n", with: "\\n")
+                    .replacingOccurrences(of: "\r", with: "\\r")
+            }
+            while cells.count < width { cells.append("") }
+            Shell.bashCurrent.stdout(cells.joined(separator: "\t") + "\n")
+        }
+    }
+}
+
+/// `gog sheets update <spreadsheetId> <range> --values-json …` — write values.
+struct SheetsUpdate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Write values to an A1 range.")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range, e.g. Sheet1!A1.") var range: String
+    @Option(name: .long, help: #"Values as JSON rows, e.g. '[["a","b"],["c"]]'."#)
+    var valuesJson: String
+    @Flag(name: .long, help: "Build the request but do not write.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard let valuesData = valuesJson.data(using: .utf8),
+              let values = try? JSONDecoder().decode([[CellValue]].self, from: valuesData)
+        else {
+            Shell.bashCurrent.stderr(
+                #"gog: --values-json must be a JSON array of rows, e.g. '[["a","b"]]'"# + "\n")
+            throw ExitCode(2)
+        }
+        struct UpdateBody: Encodable { let values: [[CellValue]] }
+        let payload = try JSONEncoder().encode(UpdateBody(values: values))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not writing\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try sheetsValuesURL(
+            spreadsheetId: spreadsheetId, range: range,
+            query: [URLQueryItem(name: "valueInputOption", value: "USER_ENTERED")])
+        let result = try await GoogleHTTPClient().put(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let updated = try JSONDecoder().decode(UpdateResult.self, from: result)
+        Shell.bashCurrent.stdout("updated \(updated.updatedCells ?? 0) cells\n")
+    }
+}
+
+/// A spreadsheet cell value — string, number, bool, or empty — so mixed-type
+/// ranges decode and round-trip through `--values-json` cleanly.
+private enum CellValue: Codable {
+    case string(String), int(Int), number(Double), bool(Bool), null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let b = try? container.decode(Bool.self) {
+            self = .bool(b)
+        } else if let i = try? container.decode(Int.self) {
+            self = .int(i)            // exact: avoids Double rounding of large ints
+        } else if let n = try? container.decode(Double.self) {
+            // Reject integers beyond exact Double range — they'd round silently;
+            // such values must be quoted as strings.
+            if n.rounded() == n, abs(n) >= 0x1p53 {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Number too large for exact representation; quote it as a string")
+            }
+            self = .number(n)
+        } else if let s = try? container.decode(String.self) {
+            self = .string(s)
+        } else {
+            // Reject objects/arrays rather than silently storing "" (which on
+            // update would clear the cell).
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unsupported cell value (expected string, number, bool, or null)")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let s): try container.encode(s)
+        case .int(let i): try container.encode(i)
+        case .number(let n): try container.encode(n)
+        case .bool(let b): try container.encode(b)
+        case .null:
+            // Sheets' values.update skips JSON null (leaving the old cell
+            // value), so encode an empty cell as "" to actually clear it.
+            try container.encode("")
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .string(let s): return s
+        case .int(let i): return String(i)
+        case .number(let n): return String(n)
+        case .bool(let b): return b ? "TRUE" : "FALSE"
+        case .null: return ""
+        }
+    }
+}
+
+private struct ValueRange: Decodable {
+    let range: String?
+    let values: [[CellValue]]?
+}
+
+private struct UpdateResult: Decodable {
+    let updatedCells: Int?
+    let updatedRange: String?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
