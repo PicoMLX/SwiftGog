@@ -744,7 +744,7 @@ struct GmailAttachments: AsyncParsableCommand {
                 let size = part.body?.size.map(String.init) ?? ""
                 Shell.bashCurrent.stdout(
                     "\(attachmentId)\t\(tsvEscaped(part.filename ?? ""))"
-                        + "\t\(part.mimeType ?? "")\t\(size)\n")
+                        + "\t\(tsvEscaped(part.mimeType ?? ""))\t\(size)\n")
                 found = true
             }
             for child in part.parts ?? [] { walk(child) }
