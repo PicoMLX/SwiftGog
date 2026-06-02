@@ -135,6 +135,14 @@ gog forms get <formId> --json
 gog forms responses <formId> --json
 ```
 
+## YouTube
+
+```bash
+gog youtube my-channel --json
+gog youtube search 'swift concurrency' --max 10 --json
+gog youtube playlists --json
+```
+
 ## Discovery
 
 ```bash
@@ -149,4 +157,4 @@ gog version
 - With `--json` the output is structured JSON; otherwise it is a compact
   human / TSV form (id, then key fields, tab-separated).
 - Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks, Docs, Sheets,
-  Chat, Slides, Forms. More services are planned — see `PLAN.md`.
+  Chat, Slides, Forms, YouTube. More services are planned — see `PLAN.md`.
