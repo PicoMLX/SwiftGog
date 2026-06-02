@@ -456,6 +456,30 @@ private struct MockTransport: GogTransport {
         #expect(run.exitStatus == ExitStatus(2))
     }
 
+    @Test func driveDownloadKeepsExistingFileWhenFetchFails() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        try await shell.fileSystem.writeData(
+            Data("ORIGINAL".utf8), to: "/gog/keep.bin", append: false)
+        shell.registerGogCommands()
+        // A failed (404) download must not have truncated the existing file.
+        let transport = MockTransport(response: HTTPResponse(
+            status: 404, body: Data(#"{"error":{"message":"nope"}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive download FILEID --out /gog/keep.bin")
+            }
+        }
+        #expect(run.exitStatus != .success)
+        let kept = try await shell.fileSystem.readData("/gog/keep.bin")
+        #expect(String(decoding: kept, as: UTF8.self) == "ORIGINAL")
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

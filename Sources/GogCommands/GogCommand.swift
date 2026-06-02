@@ -332,11 +332,13 @@ struct DriveDownload: AsyncParsableCommand {
 
     func run() async throws {
         let resolved = Shell.bashCurrent.resolvePath(out)
-        // Fail closed on a denied/out-of-mount destination before spending the
-        // download; an empty placeholder is written, then overwritten on success.
+        // Validate writability via a sibling probe — without truncating an
+        // existing destination — so a later download failure can't destroy it.
+        let probe = resolved + ".gog-precheck"
         do {
             try await Shell.bashCurrent.fileSystem.writeData(
-                Data(), to: resolved, append: false)
+                Data(), to: probe, append: false)
+            try? await Shell.bashCurrent.fileSystem.remove(probe, recursive: false)
         } catch {
             Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
             throw ExitCode(23)
@@ -344,6 +346,7 @@ struct DriveDownload: AsyncParsableCommand {
         let url = try googleURL(
             "https://www.googleapis.com/drive/v3/files", id: id,
             query: [URLQueryItem(name: "alt", value: "media")])
+        // Write the destination only after a successful fetch.
         let data = try await GoogleHTTPClient().get(url)
         do {
             try await Shell.bashCurrent.fileSystem.writeData(
