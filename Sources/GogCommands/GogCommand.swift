@@ -82,8 +82,8 @@ struct GogDrive: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "drive",
         abstract: "Google Drive.",
-        aliases: ["drv"],
-        subcommands: [DriveLs.self])
+        subcommands: [DriveLs.self],
+        aliases: ["drv"])
 }
 
 /// `gog drive ls` — list Drive files (Drive v3 `files.list`). Mirrors gogcli's
