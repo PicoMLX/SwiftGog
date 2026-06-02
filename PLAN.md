@@ -171,6 +171,7 @@ networkConfig = NetworkConfig(
         AllowedURLEntry("https://tasks.googleapis.com/"),  // Tasks
         AllowedURLEntry("https://sheets.googleapis.com/"), // Sheets (Docs/Slides export via www)
         AllowedURLEntry("https://chat.googleapis.com/"),   // Chat
+        AllowedURLEntry("https://forms.googleapis.com/"),  // Forms
     ],
     allowedMethods: [.GET, .POST, .PATCH, .PUT, .DELETE])
 ```

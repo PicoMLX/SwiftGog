@@ -68,6 +68,7 @@ gog gmail messages --max 20 --json
 gog gmail messages -q 'newer_than:7d from:example@example.com' --json
 gog gmail get <messageId> --json
 gog gmail send --to user@example.com --subject 'Hi' --body 'Hello' --dry-run
+gog gmail labels --json
 ```
 
 Drop `--dry-run` to actually send (subject to the host send policy).
@@ -127,6 +128,13 @@ gog chat messages spaces/AAAA --json
 gog chat send spaces/AAAA --text 'Hello' --dry-run
 ```
 
+## Forms
+
+```bash
+gog forms get <formId> --json
+gog forms responses <formId> --json
+```
+
 ## Discovery
 
 ```bash
@@ -141,4 +149,4 @@ gog version
 - With `--json` the output is structured JSON; otherwise it is a compact
   human / TSV form (id, then key fields, tab-separated).
 - Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks, Docs, Sheets,
-  Chat, Slides. More services are planned — see `PLAN.md`.
+  Chat, Slides, Forms. More services are planned — see `PLAN.md`.
