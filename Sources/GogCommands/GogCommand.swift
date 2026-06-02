@@ -372,7 +372,11 @@ struct GogGmail: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gmail",
         abstract: "Gmail.",
-        subcommands: [GmailMessages.self, GmailGet.self, GmailSend.self, GmailLabels.self],
+        subcommands: [
+            GmailMessages.self, GmailGet.self, GmailSend.self, GmailLabels.self,
+            GmailDrafts.self, GmailDraft.self,
+            GmailThreads.self, GmailThreadGet.self, GmailAttachment.self,
+        ],
         aliases: ["mail", "email"])
 }
 
@@ -457,6 +461,27 @@ struct GmailGet: AsyncParsableCommand {
     }
 }
 
+/// Build a plain-text RFC822 message (To/Subject/body) for Gmail `send` or
+/// `draft`. Rejects CR/LF in the header fields to prevent header injection
+/// (e.g. a smuggled `Bcc:`), and RFC 2047-encodes a non-ASCII subject. Throws
+/// `ExitCode(2)` on bad input. Shared so the injection guard has one home.
+private func plainTextMIME(to: String, subject: String, body: String) throws -> Data {
+    let newlines = CharacterSet(charactersIn: "\r\n")
+    guard to.rangeOfCharacter(from: newlines) == nil,
+          subject.rangeOfCharacter(from: newlines) == nil else {
+        Shell.bashCurrent.stderr("gog: --to and --subject must not contain newlines\n")
+        throw ExitCode(2)
+    }
+    let encodedSubject = subject.allSatisfy(\.isASCII)
+        ? subject
+        : "=?UTF-8?B?\(Data(subject.utf8).base64EncodedString())?="
+    let mime = "To: \(to)\r\n"
+        + "Subject: \(encodedSubject)\r\n"
+        + "Content-Type: text/plain; charset=UTF-8\r\n\r\n"
+        + body
+    return Data(mime.utf8)
+}
+
 /// `gog gmail send --to … --subject … --body …` — send a plain-text email.
 /// Honours the host send policy (`GogPolicies`) and `--dry-run`.
 struct GmailSend: AsyncParsableCommand {
@@ -479,23 +504,7 @@ struct GmailSend: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: sending is disabled by host policy\n")
             throw ExitCode(3)
         }
-        // Reject CR/LF in header fields to prevent header injection (e.g. Bcc:).
-        let newlines = CharacterSet(charactersIn: "\r\n")
-        guard to.rangeOfCharacter(from: newlines) == nil,
-              subject.rangeOfCharacter(from: newlines) == nil else {
-            Shell.bashCurrent.stderr(
-                "gog: --to and --subject must not contain newlines\n")
-            throw ExitCode(2)
-        }
-        // RFC 2047-encode the subject when it isn't plain ASCII.
-        let encodedSubject = subject.allSatisfy(\.isASCII)
-            ? subject
-            : "=?UTF-8?B?\(Data(subject.utf8).base64EncodedString())?="
-        let mime = "To: \(to)\r\n"
-            + "Subject: \(encodedSubject)\r\n"
-            + "Content-Type: text/plain; charset=UTF-8\r\n\r\n"
-            + body
-        let mimeData = Data(mime.utf8)
+        let mimeData = try plainTextMIME(to: to, subject: subject, body: body)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not sending\n")
             Shell.bashCurrent.stdout(
@@ -529,6 +538,17 @@ private extension Data {
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
     }
+
+    /// Decode (possibly unpadded) base64url, e.g. a Gmail attachment's `data`.
+    init?(base64URLEncoded string: String) {
+        var s = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        // base64url is ASCII, so utf8.count avoids an O(N) grapheme walk.
+        let remainder = s.utf8.count % 4
+        if remainder > 0 { s += String(repeating: "=", count: 4 - remainder) }
+        self.init(base64Encoded: s)
+    }
 }
 
 private struct GmailMessageList: Decodable {
@@ -546,6 +566,218 @@ private struct GmailMessage: Decodable {
     let snippet: String?
     let payload: Payload?
 }
+
+/// `gog gmail drafts` — list draft IDs (and their message IDs).
+struct GmailDrafts: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "drafts",
+        abstract: "List draft IDs.")
+
+    @Option(name: .long, help: "Maximum drafts to return (1–500).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 500 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 500\n")
+            throw ExitCode(2)
+        }
+        var items = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/drafts", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(GmailDraftList.self, from: body)
+        let drafts = list.drafts ?? []
+        if drafts.isEmpty { Shell.bashCurrent.stderr("No drafts\n") }
+        for draft in drafts {
+            Shell.bashCurrent.stdout("\(draft.id ?? "")\t\(draft.message?.id ?? "")\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog gmail draft --to … --subject … --body …` — compose a draft. A draft is
+/// never sent, so this is not gated by the host send policy.
+struct GmailDraft: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "draft",
+        abstract: "Create a draft (does not send).")
+
+    @Option(name: .long, help: "Recipient email address.") var to: String
+    @Option(name: .long, help: "Subject line.") var subject: String = ""
+    @Option(name: [.customShort("b"), .long], help: "Message body (plain text).")
+    var body: String = ""
+    @Flag(name: [.customShort("j"), .long], help: "Emit the raw draft result JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let mimeData = try plainTextMIME(to: to, subject: subject, body: body)
+        let payload = try JSONEncoder().encode(
+            ["message": ["raw": mimeData.base64URLEncodedString()]])
+        let url = try googleURL("https://gmail.googleapis.com/gmail/v1/users/me/drafts")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let draft = try JSONDecoder().decode(GmailDraftResult.self, from: result)
+        Shell.bashCurrent.stdout("draft created: \(draft.id ?? "")\n")
+    }
+}
+
+/// `gog gmail threads` — list thread IDs with their snippets.
+struct GmailThreads: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "threads",
+        abstract: "List thread IDs.")
+
+    @Option(name: [.customShort("q"), .long], help: "Gmail search query.")
+    var query: String?
+    @Option(name: .long, help: "Maximum threads to return (1–500).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 500 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 500\n")
+            throw ExitCode(2)
+        }
+        var items = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let query { items.append(URLQueryItem(name: "q", value: query)) }
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/threads", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(GmailThreadList.self, from: body)
+        let threads = list.threads ?? []
+        if threads.isEmpty { Shell.bashCurrent.stderr("No threads\n") }
+        for thread in threads {
+            Shell.bashCurrent.stdout(
+                "\(thread.id ?? "")\t\(tsvEscaped(thread.snippet ?? ""))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog gmail thread <id>` — a thread's messages (id, From, Subject per line).
+struct GmailThreadGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "thread",
+        abstract: "Show a thread's messages (From/Subject).")
+
+    @Argument(help: "Gmail thread ID.") var id: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/threads", id: id,
+            query: [
+                URLQueryItem(name: "format", value: "metadata"),
+                URLQueryItem(name: "metadataHeaders", value: "From"),
+                URLQueryItem(name: "metadataHeaders", value: "Subject"),
+            ])
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let thread = try JSONDecoder().decode(GmailThread.self, from: body)
+        let messages = thread.messages ?? []
+        if messages.isEmpty { Shell.bashCurrent.stderr("No messages in thread\n") }
+        for message in messages {
+            let headers = message.payload?.headers ?? []
+            func header(_ name: String) -> String {
+                headers.first {
+                    $0.name?.caseInsensitiveCompare(name) == .orderedSame
+                }?.value ?? ""
+            }
+            Shell.bashCurrent.stdout(
+                "\(message.id ?? "")\t\(tsvEscaped(header("From")))"
+                    + "\t\(tsvEscaped(header("Subject")))\n")
+        }
+    }
+}
+
+/// `gog gmail attachment <messageId> <attachmentId> --out <path>` — download a
+/// message attachment into the sandbox.
+struct GmailAttachment: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "attachment",
+        abstract: "Download a message attachment into the sandbox.",
+        aliases: ["attach"])
+
+    @Argument(help: "Gmail message ID.") var messageId: String
+    @Argument(help: "Attachment ID (from the message's MIME parts).")
+    var attachmentId: String
+    @Option(name: [.customShort("o"), .long],
+            help: "Destination path inside the sandbox.")
+    var out: String
+
+    func run() async throws {
+        let resolved = Shell.bashCurrent.resolvePath(out)
+        // Validate the destination (non-destructively) before the fetch.
+        try await ensureWritableDestination(resolved, label: out)
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+                + "\(pathSegment(messageId))/attachments/\(pathSegment(attachmentId))")
+        let body = try await GoogleHTTPClient().get(url)
+        let attach = try JSONDecoder().decode(GmailAttachmentBody.self, from: body)
+        guard let encoded = attach.data,
+              let data = Data(base64URLEncoded: encoded) else {
+            Shell.bashCurrent.stderr("gog: attachment had no decodable data\n")
+            throw ExitCode(1)
+        }
+        do {
+            try await Shell.bashCurrent.fileSystem.writeData(
+                data, to: resolved, append: false)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
+            throw ExitCode(23)
+        }
+        Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
+}
+
+private struct GmailDraftList: Decodable {
+    struct Draft: Decodable {
+        struct Msg: Decodable { let id: String?; let threadId: String? }
+        let id: String?
+        let message: Msg?
+    }
+    let drafts: [Draft]?
+    let nextPageToken: String?
+}
+private struct GmailDraftResult: Decodable {
+    struct Msg: Decodable { let id: String? }
+    let id: String?
+    let message: Msg?
+}
+private struct GmailThreadList: Decodable {
+    struct Thread: Decodable { let id: String?; let snippet: String? }
+    let threads: [Thread]?
+    let nextPageToken: String?
+}
+private struct GmailThread: Decodable {
+    let id: String?
+    let messages: [GmailMessage]?
+}
+private struct GmailAttachmentBody: Decodable { let size: Int?; let data: String? }
 
 /// `gog calendar …` — Google Calendar group (primary calendar).
 struct GogCalendar: AsyncParsableCommand {

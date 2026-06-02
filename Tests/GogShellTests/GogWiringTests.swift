@@ -355,6 +355,111 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("sent: sent123"))
     }
 
+    @Test func gmailDraftsRendersIds() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"drafts":[{"id":"d1","message":{"id":"m1"}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail drafts")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("d1\tm1"))
+    }
+
+    @Test func gmailDraftCreatePostsAndReportsId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200, body: Data(#"{"id":"draft9","message":{"id":"m9"}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog gmail draft --to a@b.com --subject Hi --body Yo")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("draft created: draft9"))
+    }
+
+    @Test func gmailDraftRejectsHeaderInjection() async throws {
+        // A newline in --to (single-quoted) must be rejected before any network,
+        // so a smuggled Bcc: can't reach the MIME headers.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog gmail draft --to 'a@b.com\nBcc: evil@x.com' --subject Hi --body Yo")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func gmailThreadsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"threads":[{"id":"t1","snippet":"hello world"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail threads")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("t1\thello world"))
+    }
+
+    @Test func gmailThreadGetRendersMessages() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"id":"t1","messages":[{"id":"m1","payload":{"headers":["#
+            + #"{"name":"From","value":"a@b.com"},"#
+            + #"{"name":"Subject","value":"Hi"}]}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail thread t1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("m1\ta@b.com\tHi"))
+    }
+
+    @Test func gmailAttachmentDownloadsIntoSandbox() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        shell.registerGogCommands()
+        // base64url of "hello" is "aGVsbG8" (unpadded).
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200, body: Data(#"{"size":5,"data":"aGVsbG8"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog gmail attachment m1 a1 --out /gog/att.bin")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let saved = try await shell.fileSystem.readData("/gog/att.bin")
+        #expect(String(decoding: saved, as: UTF8.self) == "hello")
+    }
+
     @Test func calendarEventsRendersRows() async throws {
         let shell = Shell()
         shell.registerGogCommands()
