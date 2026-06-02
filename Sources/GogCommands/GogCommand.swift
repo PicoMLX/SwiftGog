@@ -544,7 +544,8 @@ private extension Data {
         var s = string
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
-        let remainder = s.count % 4
+        // base64url is ASCII, so utf8.count avoids an O(N) grapheme walk.
+        let remainder = s.utf8.count % 4
         if remainder > 0 { s += String(repeating: "=", count: 4 - remainder) }
         self.init(base64Encoded: s)
     }
@@ -621,7 +622,7 @@ struct GmailDraft: AsyncParsableCommand {
         let mimeData = try plainTextMIME(to: to, subject: subject, body: body)
         let payload = try JSONEncoder().encode(
             ["message": ["raw": mimeData.base64URLEncodedString()]])
-        let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/drafts")!
+        let url = try googleURL("https://gmail.googleapis.com/gmail/v1/users/me/drafts")
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
