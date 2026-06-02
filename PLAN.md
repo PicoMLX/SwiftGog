@@ -173,6 +173,7 @@ networkConfig = NetworkConfig(
         AllowedURLEntry("https://chat.googleapis.com/"),   // Chat
         AllowedURLEntry("https://forms.googleapis.com/"),  // Forms
         AllowedURLEntry("https://youtube.googleapis.com/"), // YouTube
+        AllowedURLEntry("https://admin.googleapis.com/"),  // Admin SDK Directory
     ],
     allowedMethods: [.GET, .POST, .PATCH, .PUT, .DELETE])
 ```

@@ -25,6 +25,14 @@ private func googleURL(_ base: String, id: String? = nil,
     return url
 }
 
+/// Percent-encode a value that is a *single* path segment (an id, a user/group
+/// key, a Sheets range): unlike `.urlPathAllowed` it also escapes "/" so a
+/// stray separator becomes %2F instead of restructuring the request path.
+private func pathSegment(_ value: String) -> String {
+    let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
+    return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+}
+
 /// Root of the `gog` command tree. One `shell.install(GogCommand.self, …)`
 /// registration exposes the whole nested subcommand tree — the same pattern
 /// SwiftPorts' `gh` uses (`install(GhCommand.self)`), dispatched by
@@ -38,7 +46,8 @@ public struct GogCommand: AsyncParsableCommand {
             GogVersion.self, GogMe.self,
             GogDrive.self, GogGmail.self, GogCalendar.self,
             GogContacts.self, GogTasks.self, GogDocs.self, GogSheets.self,
-            GogChat.self, GogSlides.self, GogForms.self, GogYouTube.self, GogAuth.self,
+            GogChat.self, GogSlides.self, GogForms.self, GogYouTube.self,
+            GogAdmin.self, GogAuth.self,
             // Top-level aliases (mirrors gogcli's `gog ls` / `gog send`).
             DriveLs.self, GmailSend.self,
         ])
@@ -984,11 +993,9 @@ struct GogSheets: AsyncParsableCommand {
 /// becomes %2F rather than a path separator that would break the request.
 private func sheetsValuesURL(spreadsheetId: String, range: String,
                              query: [URLQueryItem] = []) throws -> URL {
-    let segment = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
-    let id = spreadsheetId.addingPercentEncoding(withAllowedCharacters: segment) ?? spreadsheetId
-    let encodedRange = range.addingPercentEncoding(withAllowedCharacters: segment) ?? range
     return try googleURL(
-        "https://sheets.googleapis.com/v4/spreadsheets/\(id)/values/\(encodedRange)",
+        "https://sheets.googleapis.com/v4/spreadsheets/\(pathSegment(spreadsheetId))"
+            + "/values/\(pathSegment(range))",
         query: query)
 }
 
@@ -1650,6 +1657,263 @@ private struct YTSearchItem: Decodable {
 }
 private struct YTPlaylistList: Decodable { let items: [YTPlaylist]?; let nextPageToken: String? }
 private struct YTPlaylist: Decodable { let id: String?; let snippet: YTSnippet? }
+
+// MARK: - Admin (Directory)
+
+/// `gog admin …` — Google Workspace **Admin SDK Directory** API (read-only).
+///
+/// These commands read the directory of the *authenticated admin's* Workspace
+/// account. The host-injected token must carry admin Directory scopes (e.g.
+/// `admin.directory.user.readonly`, `admin.directory.group.readonly`) and
+/// belong to a user with admin privileges; otherwise Google replies 403 and
+/// `gog` surfaces that message. `gog` performs no domain-wide delegation
+/// itself — scope and any impersonation are the host's responsibility (see
+/// PLAN.md). Listings default to `customer=my_customer`, i.e. the admin's own
+/// Workspace customer.
+struct GogAdmin: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "admin",
+        abstract: "Admin SDK Directory (users, groups, members) — read-only.",
+        subcommands: [
+            AdminUsers.self, AdminUser.self,
+            AdminGroups.self, AdminGroup.self, AdminMembers.self,
+        ],
+        aliases: ["directory"])
+}
+
+/// `gog admin users` — list directory users (defaults to the admin's customer).
+struct AdminUsers: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "users",
+        abstract: "List directory users.")
+
+    @Option(name: .long, help: "Maximum users to return (1–500).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Option(name: .long, help: "Restrict to one domain instead of the whole customer.")
+    var domain: String?
+    @Option(name: .long, help: "Directory search query, e.g. 'orgUnitPath=/Sales'.")
+    var query: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 500 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 500\n")
+            throw ExitCode(2)
+        }
+        var items = [
+            URLQueryItem(name: "maxResults", value: String(max)),
+            URLQueryItem(name: "orderBy", value: "email"),
+        ]
+        if let domain {
+            items.append(URLQueryItem(name: "domain", value: domain))
+        } else {
+            items.append(URLQueryItem(name: "customer", value: "my_customer"))
+        }
+        if let query { items.append(URLQueryItem(name: "query", value: query)) }
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/directory/v1/users", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(DirUserList.self, from: body)
+        let users = list.users ?? []
+        if users.isEmpty { Shell.bashCurrent.stderr("No users\n") }
+        for user in users {
+            let status = (user.suspended ?? false) ? "suspended" : "active"
+            Shell.bashCurrent.stdout(
+                "\(user.primaryEmail ?? "")\t\(tsvEscaped(user.name?.fullName ?? ""))\t\(status)\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog admin user <userKey>` — one user by primary email or unique id.
+struct AdminUser: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "user",
+        abstract: "Show a user by email or id.")
+
+    @Argument(help: "User key: primary email or unique id.") var userKey: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/directory/v1/users/\(pathSegment(userKey))")
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let user = try JSONDecoder().decode(DirUser.self, from: body)
+        let name = tsvEscaped(user.name?.fullName ?? "(unknown)")
+        let email = user.primaryEmail ?? ""
+        var line = "\(name)\(email.isEmpty ? "" : " <\(email)>")"
+        if let ou = user.orgUnitPath, !ou.isEmpty {
+            line += "\torgUnit=\(tsvEscaped(ou))"
+        }
+        if user.isAdmin == true { line += "\tadmin" }
+        if user.suspended == true { line += "\tsuspended" }
+        Shell.bashCurrent.stdout(line + "\n")
+    }
+}
+
+/// `gog admin groups` — list groups (whole customer, a domain, or for a user).
+struct AdminGroups: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "groups",
+        abstract: "List directory groups.")
+
+    @Option(name: .long, help: "Maximum groups to return (1–200).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Option(name: .long, help: "Restrict to one domain instead of the whole customer.")
+    var domain: String?
+    @Option(name: .long, help: "List only groups this user (email/id) belongs to.")
+    var user: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 200 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 200\n")
+            throw ExitCode(2)
+        }
+        var items = [URLQueryItem(name: "maxResults", value: String(max))]
+        // `userKey` is mutually exclusive with customer/domain in the API.
+        if let user {
+            items.append(URLQueryItem(name: "userKey", value: user))
+        } else if let domain {
+            items.append(URLQueryItem(name: "domain", value: domain))
+        } else {
+            items.append(URLQueryItem(name: "customer", value: "my_customer"))
+        }
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/directory/v1/groups", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(DirGroupList.self, from: body)
+        let groups = list.groups ?? []
+        if groups.isEmpty { Shell.bashCurrent.stderr("No groups\n") }
+        for group in groups {
+            Shell.bashCurrent.stdout(
+                "\(group.email ?? "")\t\(tsvEscaped(group.name ?? ""))\tmembers=\(group.directMembersCount ?? "0")\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog admin group <groupKey>` — one group by email or unique id.
+struct AdminGroup: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "group",
+        abstract: "Show a group by email or id.")
+
+    @Argument(help: "Group key: email or unique id.") var groupKey: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/directory/v1/groups/\(pathSegment(groupKey))")
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let group = try JSONDecoder().decode(DirGroup.self, from: body)
+        let name = tsvEscaped(group.name ?? "(unknown)")
+        let email = group.email ?? ""
+        var line = "\(name)\(email.isEmpty ? "" : " <\(email)>")"
+        line += "\tmembers=\(group.directMembersCount ?? "0")"
+        if let desc = group.description, !desc.isEmpty {
+            line += "\t\(tsvEscaped(desc))"
+        }
+        Shell.bashCurrent.stdout(line + "\n")
+    }
+}
+
+/// `gog admin members <groupKey>` — list a group's members.
+struct AdminMembers: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "members",
+        abstract: "List a group's members.")
+
+    @Argument(help: "Group key: email or unique id.") var groupKey: String
+    @Option(name: .long, help: "Maximum members to return (1–200).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Option(name: .long, help: "Filter by roles, e.g. 'OWNER,MANAGER'.") var roles: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 200 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 200\n")
+            throw ExitCode(2)
+        }
+        var items = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let roles { items.append(URLQueryItem(name: "roles", value: roles)) }
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/directory/v1/groups/"
+                + "\(pathSegment(groupKey))/members",
+            query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(DirMemberList.self, from: body)
+        let members = list.members ?? []
+        if members.isEmpty { Shell.bashCurrent.stderr("No members\n") }
+        for member in members {
+            Shell.bashCurrent.stdout(
+                "\(member.email ?? member.id ?? "")\t\(member.role ?? "")\t\(member.type ?? "")\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+private struct DirUserList: Decodable { let users: [DirUser]?; let nextPageToken: String? }
+private struct DirUser: Decodable {
+    struct Name: Decodable { let fullName: String? }
+    let id: String?
+    let primaryEmail: String?
+    let name: Name?
+    let suspended: Bool?
+    let isAdmin: Bool?
+    let orgUnitPath: String?
+}
+private struct DirGroupList: Decodable { let groups: [DirGroup]?; let nextPageToken: String? }
+private struct DirGroup: Decodable {
+    let id: String?
+    let email: String?
+    let name: String?
+    let description: String?
+    // The Directory API serialises this count as a JSON string (e.g. "5").
+    let directMembersCount: String?
+}
+private struct DirMemberList: Decodable { let members: [DirMember]?; let nextPageToken: String? }
+private struct DirMember: Decodable {
+    let id: String?
+    let email: String?
+    let role: String?
+    let type: String?
+    let status: String?
+}
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
 /// MVP leaf is `status`.
