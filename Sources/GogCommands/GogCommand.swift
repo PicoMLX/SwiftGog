@@ -82,7 +82,7 @@ struct GogDrive: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "drive",
         abstract: "Google Drive.",
-        subcommands: [DriveLs.self],
+        subcommands: [DriveLs.self, DriveGet.self, DriveSearch.self, DriveDownload.self],
         aliases: ["drv"])
 }
 
@@ -127,21 +127,7 @@ struct DriveLs: AsyncParsableCommand {
         comps.queryItems = query
 
         let body = try await GoogleHTTPClient().get(comps.url!)
-        if json {
-            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
-            return
-        }
-
-        let listing = try JSONDecoder().decode(DriveFileList.self, from: body)
-        let files = listing.files ?? []
-        if files.isEmpty { Shell.bashCurrent.stderr("No files\n") }
-        for file in files {
-            Shell.bashCurrent.stdout(
-                "\(file.id ?? "")\t\(file.name ?? "")\t\(file.mimeType ?? "")\n")
-        }
-        if let next = listing.nextPageToken {
-            Shell.bashCurrent.stderr("next page token: \(next)\n")
-        }
+        try emitDriveFileList(body, json: json)
     }
 }
 
@@ -153,6 +139,118 @@ private struct DriveFileList: Decodable {
     }
     let files: [File]?
     let nextPageToken: String?
+}
+
+/// Render a Drive v3 file-list response: raw JSON (`--json`) or a TSV of
+/// `id<TAB>name<TAB>mimeType`, with "No files" / next-page-token to stderr.
+private func emitDriveFileList(_ body: Data, json: Bool) throws {
+    if json {
+        Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+        return
+    }
+    let listing = try JSONDecoder().decode(DriveFileList.self, from: body)
+    let files = listing.files ?? []
+    if files.isEmpty { Shell.bashCurrent.stderr("No files\n") }
+    for file in files {
+        Shell.bashCurrent.stdout(
+            "\(file.id ?? "")\t\(file.name ?? "")\t\(file.mimeType ?? "")\n")
+    }
+    if let next = listing.nextPageToken {
+        Shell.bashCurrent.stderr("next page token: \(next)\n")
+    }
+}
+
+/// `gog drive get <id>` — fetch one file's metadata.
+struct DriveGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Show a Drive file's metadata.")
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        var comps = URLComponents(
+            string: "https://www.googleapis.com/drive/v3/files/\(id)")!
+        comps.queryItems = [URLQueryItem(
+            name: "fields", value: "id,name,mimeType,modifiedTime,size,parents")]
+        let body = try await GoogleHTTPClient().get(comps.url!)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: body)
+        Shell.bashCurrent.stdout(
+            "\(file.id ?? "")\t\(file.name ?? "")\t\(file.mimeType ?? "")\n")
+    }
+}
+
+/// `gog drive search <text>` — search files by name or full text.
+struct DriveSearch: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "search",
+        abstract: "Search Drive files by name or content.",
+        aliases: ["find"])
+
+    @Argument(help: "Search text.") var query: String
+    @Option(name: .long, help: "Maximum number of files to return (1–1000).")
+    var max: Int = 100
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+        // Escape the Drive query string literal (backslash, then quote).
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        var comps = URLComponents(
+            string: "https://www.googleapis.com/drive/v3/files")!
+        comps.queryItems = [
+            URLQueryItem(name: "q",
+                value: "(name contains '\(escaped)' or fullText contains '\(escaped)')"
+                    + " and trashed = false"),
+            URLQueryItem(name: "pageSize", value: String(max)),
+            URLQueryItem(name: "fields", value: "files(id,name,mimeType)"),
+        ]
+        let body = try await GoogleHTTPClient().get(comps.url!)
+        try emitDriveFileList(body, json: json)
+    }
+}
+
+/// `gog drive download <id> --out <path>` — write a file's contents into the
+/// sandbox via `Shell.bashCurrent.fileSystem` (paths outside the mounts are
+/// rejected). Uses Drive's `alt=media`.
+struct DriveDownload: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "download",
+        abstract: "Download a Drive file's contents into the sandbox.",
+        aliases: ["dl"])
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Option(name: [.customShort("o"), .long],
+            help: "Destination path inside the sandbox.")
+    var out: String
+
+    func run() async throws {
+        var comps = URLComponents(
+            string: "https://www.googleapis.com/drive/v3/files/\(id)")!
+        comps.queryItems = [URLQueryItem(name: "alt", value: "media")]
+        let data = try await GoogleHTTPClient().get(comps.url!)
+        let resolved = Shell.bashCurrent.resolvePath(out)
+        do {
+            try await Shell.bashCurrent.fileSystem.writeData(
+                data, to: resolved, append: false)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
+            throw ExitCode(23)
+        }
+        Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only

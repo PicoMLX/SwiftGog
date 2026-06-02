@@ -184,6 +184,80 @@ private struct MockTransport: GogTransport {
         #expect(run.stderr.contains("no credentials"))
     }
 
+    @Test func driveGetRendersFile() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"id":"abc","name":"Report.pdf","mimeType":"application/pdf"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive get abc")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("abc\tReport.pdf\tapplication/pdf"))
+    }
+
+    @Test func driveSearchRendersResults() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"files":[{"id":"f1","name":"notes.txt","mimeType":"text/plain"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive search notes")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("f1\tnotes.txt\ttext/plain"))
+    }
+
+    @Test func driveDownloadWritesIntoMount() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data("PDFBYTES".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive download FILEID --out /gog/out.bin")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let saved = try await shell.fileSystem.readData("/gog/out.bin")
+        #expect(String(decoding: saved, as: UTF8.self) == "PDFBYTES")
+    }
+
+    @Test func driveDownloadRejectsOutsideMount() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data("X".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive download FILEID --out /etc/out.bin")
+            }
+        }
+        #expect(run.exitStatus != .success)
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
