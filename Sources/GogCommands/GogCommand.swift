@@ -120,7 +120,11 @@ struct GogDrive: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "drive",
         abstract: "Google Drive.",
-        subcommands: [DriveLs.self, DriveGet.self, DriveSearch.self, DriveDownload.self, DriveUpload.self],
+        subcommands: [
+            DriveLs.self, DriveGet.self, DriveSearch.self,
+            DriveDownload.self, DriveUpload.self,
+            DrivePermissions.self, DriveRevisions.self, DriveAbout.self,
+        ],
         aliases: ["drv"])
 }
 
@@ -365,6 +369,176 @@ struct DriveDownload: AsyncParsableCommand {
         }
         Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
     }
+}
+
+/// `gog drive permissions <fileId>` — who has access to a file/folder, and how.
+struct DrivePermissions: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "permissions",
+        abstract: "List a file's permissions (who can access it).",
+        aliases: ["perms"])
+
+    @Argument(help: "Drive file or folder ID.") var fileId: String
+    @Option(name: .long, help: "Maximum permissions to return (1–100).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 100 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 100\n")
+            throw ExitCode(2)
+        }
+        var items = [
+            URLQueryItem(name: "pageSize", value: String(max)),
+            URLQueryItem(name: "supportsAllDrives", value: "true"),
+            URLQueryItem(
+                name: "fields",
+                value: "nextPageToken,permissions"
+                    + "(id,type,role,emailAddress,domain,displayName)"),
+        ]
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(fileId))/permissions",
+            query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(DrivePermissionList.self, from: body)
+        let permissions = list.permissions ?? []
+        if permissions.isEmpty { Shell.bashCurrent.stderr("No permissions\n") }
+        for perm in permissions {
+            let who = perm.emailAddress ?? perm.domain ?? perm.displayName ?? ""
+            Shell.bashCurrent.stdout(
+                "\(perm.id ?? "")\t\(perm.role ?? "")\t\(perm.type ?? "")"
+                    + "\t\(tsvEscaped(who))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog drive revisions <fileId>` — a file's version history.
+struct DriveRevisions: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "revisions",
+        abstract: "List a file's revisions (version history).",
+        aliases: ["revs"])
+
+    @Argument(help: "Drive file ID.") var fileId: String
+    @Option(name: .long, help: "Maximum revisions to return (1–1000).") var max: Int = 200
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+        var items = [
+            URLQueryItem(name: "pageSize", value: String(max)),
+            // NB: revisions.list does NOT define supportsAllDrives (only files /
+            // permissions / changes do), so it is deliberately omitted here to
+            // avoid sending an unsupported query parameter.
+            URLQueryItem(
+                name: "fields",
+                value: "nextPageToken,revisions"
+                    + "(id,modifiedTime,size,lastModifyingUser/displayName)"),
+        ]
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(fileId))/revisions",
+            query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(DriveRevisionList.self, from: body)
+        let revisions = list.revisions ?? []
+        if revisions.isEmpty { Shell.bashCurrent.stderr("No revisions\n") }
+        for rev in revisions {
+            let who = rev.lastModifyingUser?.displayName ?? ""
+            Shell.bashCurrent.stdout(
+                "\(rev.id ?? "")\t\(rev.modifiedTime ?? "")\t\(rev.size ?? "")"
+                    + "\t\(tsvEscaped(who))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog drive about` — the account's Drive storage quota and identity.
+struct DriveAbout: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "about",
+        abstract: "Show Drive storage quota and account.")
+
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        // `about` requires an explicit fields selector.
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/about",
+            query: [URLQueryItem(
+                name: "fields",
+                value: "user(displayName,emailAddress),"
+                    + "storageQuota(limit,usage,usageInDrive)")])
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let about = try JSONDecoder().decode(DriveAboutInfo.self, from: body)
+        let name = about.user?.displayName ?? "(unknown)"
+        let email = about.user?.emailAddress ?? ""
+        Shell.bashCurrent.stdout("\(name)\(email.isEmpty ? "" : " <\(email)>")\n")
+        let usage = about.storageQuota?.usage ?? "?"
+        let limit = about.storageQuota?.limit ?? "unlimited"
+        Shell.bashCurrent.stdout("quota: usage=\(usage) limit=\(limit)\n")
+    }
+}
+
+private struct DrivePermissionList: Decodable {
+    struct Permission: Decodable {
+        let id: String?
+        let type: String?
+        let role: String?
+        let emailAddress: String?
+        let domain: String?
+        let displayName: String?
+    }
+    let permissions: [Permission]?
+    let nextPageToken: String?
+}
+private struct DriveRevisionList: Decodable {
+    struct Revision: Decodable {
+        struct User: Decodable { let displayName: String? }
+        let id: String?
+        let modifiedTime: String?
+        // Drive serialises revision size as a JSON string.
+        let size: String?
+        let lastModifyingUser: User?
+    }
+    let revisions: [Revision]?
+    let nextPageToken: String?
+}
+private struct DriveAboutInfo: Decodable {
+    struct User: Decodable { let displayName: String?; let emailAddress: String? }
+    struct Quota: Decodable {
+        // These byte counts are serialised as JSON strings.
+        let limit: String?
+        let usage: String?
+        let usageInDrive: String?
+    }
+    let user: User?
+    let storageQuota: Quota?
 }
 
 /// `gog gmail …` — Gmail group (read commands; `send` lands separately).

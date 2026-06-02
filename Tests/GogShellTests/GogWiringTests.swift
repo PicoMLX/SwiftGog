@@ -277,6 +277,85 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus != .success)
     }
 
+    @Test func drivePermissionsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"permissions":[{"id":"p1","type":"user","role":"writer","#
+            + #""emailAddress":"alice@x.com"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive permissions FILEID")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("p1\twriter\tuser\talice@x.com"))
+    }
+
+    @Test func drivePermissionsEncodesFileIdInPath() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"permissions":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive permissions 'a/b'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        // The file ID is a single path segment: "/" must be encoded.
+        #expect(url.contains("a%2Fb/permissions"))
+    }
+
+    @Test func driveRevisionsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"revisions":[{"id":"r1","modifiedTime":"2026-06-01T00:00:00Z","size":"1024","lastModifyingUser":{"displayName":"Alice"}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive revisions FILEID")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("r1\t2026-06-01T00:00:00Z\t1024\tAlice"))
+    }
+
+    @Test func driveRevisionsRejectsBadMax() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive revisions FILEID --max 0")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func driveAboutRendersQuota() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"user":{"displayName":"Alice","emailAddress":"alice@x.com"},"#
+            + #""storageQuota":{"limit":"100","usage":"42"}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive about")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Alice <alice@x.com>"))
+        #expect(run.stdout.contains("quota: usage=42 limit=100"))
+    }
+
     @Test func gmailMessagesRendersIds() async throws {
         let shell = Shell()
         shell.registerGogCommands()

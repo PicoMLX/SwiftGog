@@ -56,6 +56,10 @@ gog drive ls --parent <folderId> --json
 gog drive search 'quarterly report' --json
 gog drive get <fileId> --json
 gog drive download <fileId> --out /gog/report.pdf
+
+gog drive permissions <fileId> --json   # who can access it (id, role, type, who)
+gog drive revisions <fileId> --json      # version history
+gog drive about --json                    # storage quota + account
 ```
 
 `download` writes into the sandbox workspace — choose a path under a mount
