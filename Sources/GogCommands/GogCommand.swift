@@ -441,9 +441,9 @@ struct DriveRevisions: AsyncParsableCommand {
         }
         var items = [
             URLQueryItem(name: "pageSize", value: String(max)),
-            // Be shared-drive-aware (Google's recommended posture), matching
-            // `drive permissions`, so revisions of a shared-drive file resolve.
-            URLQueryItem(name: "supportsAllDrives", value: "true"),
+            // NB: revisions.list does NOT define supportsAllDrives (only files /
+            // permissions / changes do), so it is deliberately omitted here to
+            // avoid sending an unsupported query parameter.
             URLQueryItem(
                 name: "fields",
                 value: "nextPageToken,revisions"
