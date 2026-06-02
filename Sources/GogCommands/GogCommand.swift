@@ -1018,7 +1018,16 @@ struct SheetsGet: AsyncParsableCommand {
         let rows = result.values ?? []
         if rows.isEmpty { Shell.bashCurrent.stderr("No values\n") }
         for row in rows {
-            Shell.bashCurrent.stdout(row.map(\.text).joined(separator: "\t") + "\n")
+            // Escape delimiters so a cell containing a tab/newline can't break
+            // the one-row-per-record TSV shape.
+            let cells = row.map { cell in
+                cell.text
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\t", with: "\\t")
+                    .replacingOccurrences(of: "\n", with: "\\n")
+                    .replacingOccurrences(of: "\r", with: "\\r")
+            }
+            Shell.bashCurrent.stdout(cells.joined(separator: "\t") + "\n")
         }
     }
 }
@@ -1069,7 +1078,7 @@ struct SheetsUpdate: AsyncParsableCommand {
 /// A spreadsheet cell value — string, number, bool, or empty — so mixed-type
 /// ranges decode and round-trip through `--values-json` cleanly.
 private enum CellValue: Codable {
-    case string(String), number(Double), bool(Bool), null
+    case string(String), int(Int), number(Double), bool(Bool), null
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -1077,10 +1086,18 @@ private enum CellValue: Codable {
             self = .null
         } else if let b = try? container.decode(Bool.self) {
             self = .bool(b)
+        } else if let i = try? container.decode(Int.self) {
+            self = .int(i)            // exact: avoids Double rounding of large ints
         } else if let n = try? container.decode(Double.self) {
             self = .number(n)
+        } else if let s = try? container.decode(String.self) {
+            self = .string(s)
         } else {
-            self = .string((try? container.decode(String.self)) ?? "")
+            // Reject objects/arrays rather than silently storing "" (which on
+            // update would clear the cell).
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unsupported cell value (expected string, number, bool, or null)")
         }
     }
 
@@ -1088,6 +1105,7 @@ private enum CellValue: Codable {
         var container = encoder.singleValueContainer()
         switch self {
         case .string(let s): try container.encode(s)
+        case .int(let i): try container.encode(i)
         case .number(let n): try container.encode(n)
         case .bool(let b): try container.encode(b)
         case .null:
@@ -1100,8 +1118,8 @@ private enum CellValue: Codable {
     var text: String {
         switch self {
         case .string(let s): return s
-        case .number(let n):
-            return (n == n.rounded() && abs(n) < 1e15) ? String(Int(n)) : String(n)
+        case .int(let i): return String(i)
+        case .number(let n): return String(n)
         case .bool(let b): return b ? "TRUE" : "FALSE"
         case .null: return ""
         }

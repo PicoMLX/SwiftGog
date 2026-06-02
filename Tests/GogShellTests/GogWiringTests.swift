@@ -753,6 +753,42 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(!run.stdout.contains("null"))
     }
 
+    @Test func sheetsUpdatePreservesLargeIntegers() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // 9007199254740993 > 2^53 would round if decoded through Double.
+        let run = try await shell.runCapturing(
+            "gog sheets update SID 'A1' --values-json '[[9007199254740993]]' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("9007199254740993"))
+    }
+
+    @Test func sheetsUpdateRejectsObjectCell() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets update SID 'A1' --values-json '[[{}]]'")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func sheetsGetEscapesDelimitersInCells() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Cell value "a\nb" (real newline) must render on one row, escaped.
+        let json = #"{"values":[["a\nb","c"]]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets get SID 'Sheet1!A1:B1'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains(#"a\nb"# + "\tc"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
