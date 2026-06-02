@@ -112,6 +112,21 @@ gog sheets get <spreadsheetId> 'Sheet1!A1:D20' --json
 gog sheets update <spreadsheetId> 'Sheet1!A1' --values-json '[["hello","world"]]' --dry-run
 ```
 
+## Slides
+
+```bash
+gog slides export <presentationId> --out /gog/deck.pdf
+gog slides export <presentationId> --mime text/plain --out /gog/deck.txt
+```
+
+## Chat
+
+```bash
+gog chat spaces --json
+gog chat messages spaces/AAAA --json
+gog chat send spaces/AAAA --text 'Hello' --dry-run
+```
+
 ## Discovery
 
 ```bash
@@ -125,5 +140,5 @@ gog version
 
 - With `--json` the output is structured JSON; otherwise it is a compact
   human / TSV form (id, then key fields, tab-separated).
-- Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks, Docs, Sheets.
-  More services are planned — see `PLAN.md`.
+- Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks, Docs, Sheets,
+  Chat, Slides. More services are planned — see `PLAN.md`.

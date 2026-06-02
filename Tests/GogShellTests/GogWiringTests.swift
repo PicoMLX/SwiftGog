@@ -877,6 +877,97 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(String(decoding: sibling, as: UTF8.self) == "keep")
     }
 
+    @Test func chatSpacesRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"spaces":[{"name":"spaces/AAA","displayName":"Team"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog chat spaces")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("spaces/AAA\tTeam"))
+    }
+
+    @Test func chatMessagesEscapesText() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"messages":[{"name":"spaces/AAA/messages/1","text":"line1\nline2"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog chat messages spaces/AAA")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains(#"line1\nline2"#))   // newline escaped, one row
+    }
+
+    @Test func chatSendDryRun() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog chat send spaces/AAA --text Hello --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Hello"))
+    }
+
+    @Test func chatSendBlockedByPolicy() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(chatSendDisabled: true)
+        ) {
+            try await shell.runCapturing("gog chat send spaces/AAA --text Hello")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func chatSendPosts() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(response: HTTPResponse(
+            status: 200, body: Data(#"{"name":"spaces/AAA/messages/9"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog chat send spaces/AAA --text Hello")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("sent: spaces/AAA/messages/9"))
+    }
+
+    @Test func slidesExportWritesToMount() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data("PDFDATA".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides export PID --out /gog/deck.pdf")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let saved = try await shell.fileSystem.readData("/gog/deck.pdf")
+        #expect(String(decoding: saved, as: UTF8.self) == "PDFDATA")
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

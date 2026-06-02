@@ -4,9 +4,12 @@
 public struct GogPolicy: Sendable {
     /// When true, `gog gmail send` refuses to send (exit 3).
     public var gmailSendDisabled: Bool
+    /// When true, `gog chat send` refuses to send (exit 3).
+    public var chatSendDisabled: Bool
 
-    public init(gmailSendDisabled: Bool = false) {
+    public init(gmailSendDisabled: Bool = false, chatSendDisabled: Bool = false) {
         self.gmailSendDisabled = gmailSendDisabled
+        self.chatSendDisabled = chatSendDisabled
     }
 }
 

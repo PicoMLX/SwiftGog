@@ -37,7 +37,8 @@ public struct GogCommand: AsyncParsableCommand {
         subcommands: [
             GogVersion.self, GogMe.self,
             GogDrive.self, GogGmail.self, GogCalendar.self,
-            GogContacts.self, GogTasks.self, GogDocs.self, GogSheets.self, GogAuth.self,
+            GogContacts.self, GogTasks.self, GogDocs.self, GogSheets.self,
+            GogChat.self, GogSlides.self, GogAuth.self,
             // Top-level aliases (mirrors gogcli's `gog ls` / `gog send`).
             DriveLs.self, GmailSend.self,
         ])
@@ -1068,13 +1069,7 @@ struct SheetsGet: AsyncParsableCommand {
         for index in 0..<height {
             // Escape delimiters so a cell containing a tab/newline can't break
             // the one-row-per-record TSV shape.
-            var cells = (index < rows.count ? rows[index] : []).map { cell in
-                cell.text
-                    .replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "\t", with: "\\t")
-                    .replacingOccurrences(of: "\n", with: "\\n")
-                    .replacingOccurrences(of: "\r", with: "\\r")
-            }
+            var cells = (index < rows.count ? rows[index] : []).map { tsvEscaped($0.text) }
             while cells.count < width { cells.append("") }
             Shell.bashCurrent.stdout(cells.joined(separator: "\t") + "\n")
         }
@@ -1190,6 +1185,202 @@ private struct ValueRange: Decodable {
 private struct UpdateResult: Decodable {
     let updatedCells: Int?
     let updatedRange: String?
+}
+
+/// Escape TSV delimiters (`\`, tab, CR, LF) so a value can't break the
+/// one-record-per-line shape.
+private func tsvEscaped(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\t", with: "\\t")
+        .replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\r", with: "\\r")
+}
+
+// MARK: - Slides (export via Drive)
+
+/// `gog slides …` — Google Slides, exported through Drive.
+struct GogSlides: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "slides",
+        abstract: "Google Slides (export via Drive).",
+        subcommands: [SlidesExport.self],
+        aliases: ["slide"])
+}
+
+/// `gog slides export <id> --out <path>` — export a presentation (PDF by
+/// default) into the sandbox.
+struct SlidesExport: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "export",
+        abstract: "Export a presentation to a sandbox path.")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Option(name: .long, help: "Export MIME type (default application/pdf).")
+    var mime: String = "application/pdf"
+    @Option(name: [.customShort("o"), .long],
+            help: "Destination path inside the sandbox.")
+    var out: String
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files",
+            id: "\(presentationId)/export",
+            query: [URLQueryItem(name: "mimeType", value: mime)])
+        let resolved = Shell.bashCurrent.resolvePath(out)
+        try await ensureWritableDestination(resolved, label: out)
+        let data = try await GoogleHTTPClient().get(url)
+        do {
+            try await Shell.bashCurrent.fileSystem.writeData(data, to: resolved, append: false)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
+            throw ExitCode(23)
+        }
+        Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
+}
+
+// MARK: - Chat
+
+/// `gog chat …` — Google Chat.
+struct GogChat: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "chat",
+        abstract: "Google Chat.",
+        subcommands: [ChatSpaces.self, ChatMessages.self, ChatSend.self])
+}
+
+/// `gog chat spaces` — list the spaces you're in.
+struct ChatSpaces: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "spaces",
+        abstract: "List Chat spaces.")
+
+    @Option(name: .long, help: "Maximum spaces to return (1–1000).")
+    var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+        var query = [URLQueryItem(name: "pageSize", value: String(max))]
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL("https://chat.googleapis.com/v1/spaces", query: query)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(ChatSpaceList.self, from: body)
+        let spaces = list.spaces ?? []
+        if spaces.isEmpty { Shell.bashCurrent.stderr("No spaces\n") }
+        for space in spaces {
+            Shell.bashCurrent.stdout(
+                "\(space.name ?? "")\t\(tsvEscaped(space.displayName ?? ""))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog chat messages <space>` — list messages in a space.
+struct ChatMessages: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "messages",
+        abstract: "List messages in a space (e.g. spaces/AAAA).")
+
+    @Argument(help: "Space resource name, e.g. spaces/AAAA.") var space: String
+    @Option(name: .long, help: "Maximum messages to return (1–1000).")
+    var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+        var query = [URLQueryItem(name: "pageSize", value: String(max))]
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://chat.googleapis.com/v1", id: "\(space)/messages", query: query)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(ChatMessageList.self, from: body)
+        let messages = list.messages ?? []
+        if messages.isEmpty { Shell.bashCurrent.stderr("No messages\n") }
+        for message in messages {
+            Shell.bashCurrent.stdout(
+                "\(message.name ?? "")\t\(tsvEscaped(message.text ?? ""))\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog chat send <space> --text …` — post a message to a space.
+struct ChatSend: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "send",
+        abstract: "Send a message to a space.")
+
+    @Argument(help: "Space resource name, e.g. spaces/AAAA.") var space: String
+    @Option(name: [.customShort("t"), .long], help: "Message text.") var text: String
+    @Flag(name: .long, help: "Build the request but do not send it.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        if GogPolicies.current.chatSendDisabled {
+            Shell.bashCurrent.stderr("gog: sending is disabled by host policy\n")
+            throw ExitCode(3)
+        }
+        let payload = try JSONEncoder().encode(["text": text])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not sending\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://chat.googleapis.com/v1", id: "\(space)/messages")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let sent = try JSONDecoder().decode(ChatMessage.self, from: result)
+        Shell.bashCurrent.stdout("sent: \(sent.name ?? "")\n")
+    }
+}
+
+private struct ChatSpaceList: Decodable {
+    let spaces: [ChatSpace]?
+    let nextPageToken: String?
+}
+private struct ChatSpace: Decodable {
+    let name: String?
+    let displayName: String?
+}
+private struct ChatMessageList: Decodable {
+    let messages: [ChatMessage]?
+    let nextPageToken: String?
+}
+private struct ChatMessage: Decodable {
+    let name: String?
+    let text: String?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
