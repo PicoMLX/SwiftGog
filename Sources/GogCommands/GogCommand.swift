@@ -983,6 +983,19 @@ struct GogSheets: AsyncParsableCommand {
         aliases: ["sheet"])
 }
 
+/// Build the Sheets `…/{id}/values/{range}` URL, percent-encoding the
+/// spreadsheet id and range as single path segments — so a `/` in a sheet name
+/// becomes %2F rather than a path separator that would break the request.
+private func sheetsValuesURL(spreadsheetId: String, range: String,
+                             query: [URLQueryItem] = []) throws -> URL {
+    let segment = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
+    let id = spreadsheetId.addingPercentEncoding(withAllowedCharacters: segment) ?? spreadsheetId
+    let encodedRange = range.addingPercentEncoding(withAllowedCharacters: segment) ?? range
+    return try googleURL(
+        "https://sheets.googleapis.com/v4/spreadsheets/\(id)/values/\(encodedRange)",
+        query: query)
+}
+
 /// `gog sheets get <spreadsheetId> <range>` — read a range of values.
 struct SheetsGet: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -995,9 +1008,7 @@ struct SheetsGet: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
-        let url = try googleURL(
-            "https://sheets.googleapis.com/v4/spreadsheets",
-            id: "\(spreadsheetId)/values/\(range)")
+        let url = try sheetsValuesURL(spreadsheetId: spreadsheetId, range: range)
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
@@ -1042,9 +1053,8 @@ struct SheetsUpdate: AsyncParsableCommand {
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
             return
         }
-        let url = try googleURL(
-            "https://sheets.googleapis.com/v4/spreadsheets",
-            id: "\(spreadsheetId)/values/\(range)",
+        let url = try sheetsValuesURL(
+            spreadsheetId: spreadsheetId, range: range,
             query: [URLQueryItem(name: "valueInputOption", value: "USER_ENTERED")])
         let result = try await GoogleHTTPClient().put(url, jsonBody: payload)
         if json {
@@ -1080,7 +1090,10 @@ private enum CellValue: Codable {
         case .string(let s): try container.encode(s)
         case .number(let n): try container.encode(n)
         case .bool(let b): try container.encode(b)
-        case .null: try container.encodeNil()
+        case .null:
+            // Sheets' values.update skips JSON null (leaving the old cell
+            // value), so encode an empty cell as "" to actually clear it.
+            try container.encode("")
         }
     }
 

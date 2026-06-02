@@ -22,6 +22,19 @@ private struct MockTransport: GogTransport {
     }
 }
 
+/// Like MockTransport but records the last request URL, for asserting on URL
+/// construction (e.g. percent-encoding).
+private final class RecordingTransport: GogTransport, @unchecked Sendable {
+    let response: HTTPResponse
+    var lastURL: URL?
+    init(response: HTTPResponse) { self.response = response }
+    func send(method: String, url: URL,
+              headers: [String: String], body: Data?) async throws -> HTTPResponse {
+        lastURL = url
+        return response
+    }
+}
+
 /// Wiring + behaviour tests: `gog` registered into a sandboxed `Shell` and run
 /// through `runCapturing`. Covers the fail-closed sandbox contracts (deny
 /// paths) and command happy paths via an injected fake `GogTransport`.
@@ -709,6 +722,35 @@ private struct MockTransport: GogTransport {
         let run = try await shell.runCapturing(
             "gog sheets update SID 'Sheet1!A1' --values-json nope")
         #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func sheetsGetEncodesSlashInRange() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"values":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets get SID 'Q1/Q2!A1'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        // The "/" inside the sheet name must be encoded, not a path separator.
+        #expect(transport.lastURL?.absoluteString.contains("Q1%2FQ2") == true)
+    }
+
+    @Test func sheetsUpdateClearsCellForNull() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // --dry-run prints the encoded body; null must become "" so the cell is
+        // cleared (Sheets skips JSON null on update).
+        let run = try await shell.runCapturing(
+            "gog sheets update SID 'A1' --values-json '[[\"x\",null]]' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains(#"["x",""]"#))
+        #expect(!run.stdout.contains("null"))
     }
 
     @Test func writesOutsideTheMountAreRejected() async throws {
