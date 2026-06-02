@@ -644,6 +644,73 @@ private struct MockTransport: GogTransport {
         #expect(run.exitStatus == .success)
     }
 
+    @Test func docsCatExportsText() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data("Hello doc".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog docs cat DOCID")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Hello doc"))
+    }
+
+    @Test func sheetsGetRendersMixedTypeTSV() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"range":"Sheet1!A1:C1","values":[["x",5,true]]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets get SID 'Sheet1!A1:C1'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("x\t5\tTRUE"))
+    }
+
+    @Test func sheetsUpdatePutsAndReportsCells() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"updatedCells":2}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog sheets update SID 'Sheet1!A1' --values-json '[[\"a\",\"b\"]]'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("updated 2 cells"))
+    }
+
+    @Test func sheetsUpdateDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets update SID 'Sheet1!A1' --values-json '[[\"a\"]]' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("\"a\""))
+    }
+
+    @Test func sheetsUpdateRejectsBadJSON() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets update SID 'Sheet1!A1' --values-json nope")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

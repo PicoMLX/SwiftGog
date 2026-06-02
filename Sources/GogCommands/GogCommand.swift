@@ -37,7 +37,7 @@ public struct GogCommand: AsyncParsableCommand {
         subcommands: [
             GogVersion.self, GogMe.self,
             GogDrive.self, GogGmail.self, GogCalendar.self,
-            GogContacts.self, GogTasks.self, GogAuth.self,
+            GogContacts.self, GogTasks.self, GogDocs.self, GogSheets.self, GogAuth.self,
             // Top-level aliases (mirrors gogcli's `gog ls` / `gog send`).
             DriveLs.self, GmailSend.self,
         ])
@@ -916,6 +916,193 @@ private struct TaskItem: Decodable {
     let id: String?
     let title: String?
     let status: String?
+}
+
+// MARK: - Docs (export via Drive)
+
+/// `gog docs …` — Google Docs, read by exporting through Drive.
+struct GogDocs: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "docs",
+        abstract: "Google Docs (export via Drive).",
+        subcommands: [DocsCat.self],
+        aliases: ["doc"])
+}
+
+/// `gog docs cat <documentId>` — export a Doc's contents as text or markdown.
+struct DocsCat: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "cat",
+        abstract: "Export a Doc's contents (via Drive export).")
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Option(name: .long, help: "Export format: text or markdown.")
+    var format: String = "text"
+    @Option(name: [.customShort("o"), .long],
+            help: "Write to a sandbox path instead of stdout.")
+    var out: String?
+
+    func run() async throws {
+        let mimeType: String
+        switch format {
+        case "text": mimeType = "text/plain"
+        case "markdown", "md": mimeType = "text/markdown"
+        default:
+            Shell.bashCurrent.stderr("gog: --format must be text or markdown\n")
+            throw ExitCode(2)
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files",
+            id: "\(documentId)/export",
+            query: [URLQueryItem(name: "mimeType", value: mimeType)])
+        // Fetch first; only write the destination after a successful export.
+        let data = try await GoogleHTTPClient().get(url)
+        guard let out else {
+            Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self))
+            return
+        }
+        let resolved = Shell.bashCurrent.resolvePath(out)
+        do {
+            try await Shell.bashCurrent.fileSystem.writeData(data, to: resolved, append: false)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
+            throw ExitCode(23)
+        }
+        Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
+}
+
+// MARK: - Sheets
+
+/// `gog sheets …` — Google Sheets cell values.
+struct GogSheets: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "sheets",
+        abstract: "Google Sheets.",
+        subcommands: [SheetsGet.self, SheetsUpdate.self],
+        aliases: ["sheet"])
+}
+
+/// `gog sheets get <spreadsheetId> <range>` — read a range of values.
+struct SheetsGet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Read cell values from an A1 range.")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range, e.g. Sheet1!A1:D20.") var range: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://sheets.googleapis.com/v4/spreadsheets",
+            id: "\(spreadsheetId)/values/\(range)")
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let result = try JSONDecoder().decode(ValueRange.self, from: body)
+        let rows = result.values ?? []
+        if rows.isEmpty { Shell.bashCurrent.stderr("No values\n") }
+        for row in rows {
+            Shell.bashCurrent.stdout(row.map(\.text).joined(separator: "\t") + "\n")
+        }
+    }
+}
+
+/// `gog sheets update <spreadsheetId> <range> --values-json …` — write values.
+struct SheetsUpdate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Write values to an A1 range.")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range, e.g. Sheet1!A1.") var range: String
+    @Option(name: .long, help: #"Values as JSON rows, e.g. '[["a","b"],["c"]]'."#)
+    var valuesJson: String
+    @Flag(name: .long, help: "Build the request but do not write.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard let valuesData = valuesJson.data(using: .utf8),
+              let values = try? JSONDecoder().decode([[CellValue]].self, from: valuesData)
+        else {
+            Shell.bashCurrent.stderr(
+                #"gog: --values-json must be a JSON array of rows, e.g. '[["a","b"]]'"# + "\n")
+            throw ExitCode(2)
+        }
+        struct UpdateBody: Encodable { let values: [[CellValue]] }
+        let payload = try JSONEncoder().encode(UpdateBody(values: values))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not writing\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://sheets.googleapis.com/v4/spreadsheets",
+            id: "\(spreadsheetId)/values/\(range)",
+            query: [URLQueryItem(name: "valueInputOption", value: "USER_ENTERED")])
+        let result = try await GoogleHTTPClient().put(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let updated = try JSONDecoder().decode(UpdateResult.self, from: result)
+        Shell.bashCurrent.stdout("updated \(updated.updatedCells ?? 0) cells\n")
+    }
+}
+
+/// A spreadsheet cell value — string, number, bool, or empty — so mixed-type
+/// ranges decode and round-trip through `--values-json` cleanly.
+private enum CellValue: Codable {
+    case string(String), number(Double), bool(Bool), null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let b = try? container.decode(Bool.self) {
+            self = .bool(b)
+        } else if let n = try? container.decode(Double.self) {
+            self = .number(n)
+        } else {
+            self = .string((try? container.decode(String.self)) ?? "")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let s): try container.encode(s)
+        case .number(let n): try container.encode(n)
+        case .bool(let b): try container.encode(b)
+        case .null: try container.encodeNil()
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .string(let s): return s
+        case .number(let n):
+            return (n == n.rounded() && abs(n) < 1e15) ? String(Int(n)) : String(n)
+        case .bool(let b): return b ? "TRUE" : "FALSE"
+        case .null: return ""
+        }
+    }
+}
+
+private struct ValueRange: Decodable {
+    let range: String?
+    let values: [[CellValue]]?
+}
+
+private struct UpdateResult: Decodable {
+    let updatedCells: Int?
+    let updatedRange: String?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
