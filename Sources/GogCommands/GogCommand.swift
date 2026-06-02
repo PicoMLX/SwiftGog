@@ -704,6 +704,8 @@ struct ContactsList: AsyncParsableCommand {
 
     @Option(name: .long, help: "Maximum contacts to return (1–1000).")
     var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
 
@@ -712,12 +714,14 @@ struct ContactsList: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
             throw ExitCode(2)
         }
+        var query = [
+            URLQueryItem(name: "personFields", value: "names,emailAddresses"),
+            URLQueryItem(name: "pageSize", value: String(max)),
+        ]
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
         let url = try googleURL(
             "https://people.googleapis.com/v1/people/me/connections",
-            query: [
-                URLQueryItem(name: "personFields", value: "names,emailAddresses"),
-                URLQueryItem(name: "pageSize", value: String(max)),
-            ])
+            query: query)
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
@@ -825,6 +829,8 @@ struct TasksList: AsyncParsableCommand {
     var list: String = "@default"
     @Option(name: .long, help: "Maximum tasks to return (1–100).")
     var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
 
@@ -833,9 +839,11 @@ struct TasksList: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --max must be between 1 and 100\n")
             throw ExitCode(2)
         }
+        var query = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
         let url = try googleURL(
             "https://tasks.googleapis.com/tasks/v1/lists", id: "\(list)/tasks",
-            query: [URLQueryItem(name: "maxResults", value: String(max))])
+            query: query)
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
@@ -846,6 +854,9 @@ struct TasksList: AsyncParsableCommand {
         if tasks.isEmpty { Shell.bashCurrent.stderr("No tasks\n") }
         for task in tasks {
             Shell.bashCurrent.stdout("\(task.id ?? "")\t\(task.status ?? "")\t\(task.title ?? "")\n")
+        }
+        if let next = result.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
         }
     }
 }
@@ -883,6 +894,7 @@ private struct TaskListCollection: Decodable {
 
 private struct TaskCollection: Decodable {
     let items: [TaskItem]?
+    let nextPageToken: String?
 }
 
 private struct TaskItem: Decodable {
