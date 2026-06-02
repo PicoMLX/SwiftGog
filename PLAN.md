@@ -34,6 +34,29 @@
 
 ---
 
+## Open questions (decisions pending)
+
+### OAuth token *refresh* ownership — **undecided** (owner TBD)
+
+When an injected access token expires (`gog` gets a `401`), **who performs the OAuth
+refresh?** Recorded here because it is not yet decided ("not sure who can best handle that").
+
+- **Option A — host owns refresh (current default).** `GogCredentialProvider
+  .refreshedAccessToken()` returns a freshly-minted token from the host; `SwiftGog` never
+  calls the token endpoint. The network allow-list stays **API-hosts-only** (no
+  `oauth2.googleapis.com`). `SwiftGog` contains **zero** OAuth.
+- **Option B — `SwiftGog` refreshes.** The host injects a refresh token + client ID/secret;
+  `GogCore` does the `POST https://oauth2.googleapis.com/token` through `SecureFetcher`.
+  This re-adds `oauth2.googleapis.com` to the allow-list (~40 LOC) and widens
+  `GogCredentialProvider` to expose the refresh token + client creds — i.e. a sliver of
+  OAuth comes back into scope.
+
+**Impact of the choice:** the network allow-list hosts, the `GogCredentialProvider` surface,
+and Phase 0 ②. **Until decided, the code assumes Option A** — `refreshedAccessToken()` is
+host-implemented, and its default implementation simply re-returns `accessToken()`.
+
+---
+
 ## Context
 
 `gogcli` (`picomlx/gogcli`) is a ~211K-LOC (≈95K excl. tests) Go **Google Workspace CLI**
