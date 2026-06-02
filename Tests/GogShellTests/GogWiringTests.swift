@@ -382,6 +382,41 @@ private struct MockTransport: GogTransport {
         #expect(run.stdout.contains("created: evt1"))
     }
 
+    @Test func httpErrorSurfacesGoogleMessage() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let errorBody = #"{"error":{"code":404,"message":"File not found."}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 404, body: Data(errorBody.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive get abc")
+            }
+        }
+        #expect(run.exitStatus != .success)
+        #expect(run.stderr.contains("File not found."))
+    }
+
+    @Test func driveGetEscapesUnsafeId() async throws {
+        // A space/slash in the id would crash a force-unwrapped URL; the
+        // percent-encoding path must keep it a normal request.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"id":"x","name":"f","mimeType":"text/plain"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive get 'a b/c'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

@@ -55,7 +55,9 @@ public struct GoogleHTTPClient {
                 throw ExitCode(7)
             }
             guard response.status < 400 else {
-                Shell.bashCurrent.stderr("gog: HTTP \(response.status)\n")
+                let detail = Self.googleErrorMessage(response.body)
+                Shell.bashCurrent.stderr(
+                    "gog: HTTP \(response.status)" + (detail.map { ": \($0)" } ?? "") + "\n")
                 throw ExitCode(1)
             }
             return response.body
@@ -63,5 +65,15 @@ public struct GoogleHTTPClient {
             Shell.bashCurrent.stderr("gog: (\(err.exitCode)) \(err.description)\n")
             throw ExitCode(Int32(err.exitCode))
         }
+    }
+
+    /// Pull `error.message` out of a Google JSON error body, if present, for a
+    /// more useful diagnostic than a bare status code.
+    private static func googleErrorMessage(_ body: Data) -> String? {
+        struct Envelope: Decodable {
+            struct APIError: Decodable { let message: String? }
+            let error: APIError?
+        }
+        return (try? JSONDecoder().decode(Envelope.self, from: body))?.error?.message
     }
 }

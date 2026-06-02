@@ -3,6 +3,28 @@ import Foundation
 import BashInterpreter
 import GogCore
 
+/// Build a Google API URL from a constant base, an optional path-escaped id,
+/// and query items. Never force-unwraps, so a hostile id can't crash the
+/// process — it fails with exit 2 instead.
+private func googleURL(_ base: String, id: String? = nil,
+                       query: [URLQueryItem] = []) throws -> URL {
+    var string = base
+    if let id {
+        string += "/" + (id.addingPercentEncoding(
+            withAllowedCharacters: .urlPathAllowed) ?? "")
+    }
+    guard var components = URLComponents(string: string) else {
+        Shell.bashCurrent.stderr("gog: could not build a valid request URL\n")
+        throw ExitCode(2)
+    }
+    if !query.isEmpty { components.queryItems = query }
+    guard let url = components.url else {
+        Shell.bashCurrent.stderr("gog: could not build a valid request URL\n")
+        throw ExitCode(2)
+    }
+    return url
+}
+
 /// Root of the `gog` command tree. One `shell.install(GogCommand.self, …)`
 /// registration exposes the whole nested subcommand tree — the same pattern
 /// SwiftPorts' `gh` uses (`install(GhCommand.self)`), dispatched by
@@ -118,8 +140,11 @@ struct DriveLs: AsyncParsableCommand {
                 value: "nextPageToken,files(id,name,mimeType,modifiedTime,size)"),
         ]
         if let parent {
+            let escaped = parent
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "'", with: "\\'")
             query.append(URLQueryItem(
-                name: "q", value: "'\(parent)' in parents and trashed = false"))
+                name: "q", value: "'\(escaped)' in parents and trashed = false"))
         }
         if let page {
             query.append(URLQueryItem(name: "pageToken", value: page))
@@ -171,11 +196,11 @@ struct DriveGet: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
-        var comps = URLComponents(
-            string: "https://www.googleapis.com/drive/v3/files/\(id)")!
-        comps.queryItems = [URLQueryItem(
-            name: "fields", value: "id,name,mimeType,modifiedTime,size,parents")]
-        let body = try await GoogleHTTPClient().get(comps.url!)
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: id,
+            query: [URLQueryItem(
+                name: "fields", value: "id,name,mimeType,modifiedTime,size,parents")])
+        let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
             return
@@ -237,10 +262,10 @@ struct DriveDownload: AsyncParsableCommand {
     var out: String
 
     func run() async throws {
-        var comps = URLComponents(
-            string: "https://www.googleapis.com/drive/v3/files/\(id)")!
-        comps.queryItems = [URLQueryItem(name: "alt", value: "media")]
-        let data = try await GoogleHTTPClient().get(comps.url!)
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: id,
+            query: [URLQueryItem(name: "alt", value: "media")])
+        let data = try await GoogleHTTPClient().get(url)
         let resolved = Shell.bashCurrent.resolvePath(out)
         do {
             try await Shell.bashCurrent.fileSystem.writeData(
@@ -315,15 +340,15 @@ struct GmailGet: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
-        var comps = URLComponents(
-            string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)")!
-        comps.queryItems = [
-            URLQueryItem(name: "format", value: "metadata"),
-            URLQueryItem(name: "metadataHeaders", value: "From"),
-            URLQueryItem(name: "metadataHeaders", value: "Subject"),
-            URLQueryItem(name: "metadataHeaders", value: "Date"),
-        ]
-        let body = try await GoogleHTTPClient().get(comps.url!)
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages", id: id,
+            query: [
+                URLQueryItem(name: "format", value: "metadata"),
+                URLQueryItem(name: "metadataHeaders", value: "From"),
+                URLQueryItem(name: "metadataHeaders", value: "Subject"),
+                URLQueryItem(name: "metadataHeaders", value: "Date"),
+            ])
+        let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
             return
@@ -365,8 +390,12 @@ struct GmailSend: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: sending is disabled by host policy\n")
             throw ExitCode(3)
         }
+        // RFC 2047-encode the subject when it isn't plain ASCII.
+        let encodedSubject = subject.allSatisfy(\.isASCII)
+            ? subject
+            : "=?UTF-8?B?\(Data(subject.utf8).base64EncodedString())?="
         let mime = "To: \(to)\r\n"
-            + "Subject: \(subject)\r\n"
+            + "Subject: \(encodedSubject)\r\n"
             + "Content-Type: text/plain; charset=UTF-8\r\n\r\n"
             + body
         let mimeData = Data(mime.utf8)
@@ -488,8 +517,8 @@ struct CalendarGet: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
-        let url = URL(string:
-            "https://www.googleapis.com/calendar/v3/calendars/primary/events/\(id)")!
+        let url = try googleURL(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events", id: id)
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
