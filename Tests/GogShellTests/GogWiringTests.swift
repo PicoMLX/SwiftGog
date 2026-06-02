@@ -70,6 +70,20 @@ private struct StubProvider: GogCredentialProvider {
         #expect(!run.stderr.contains("secret-token-xyz"))
     }
 
+    @Test func meFailsClosedWithoutCredentials() async throws {
+        let shell = Shell()
+        shell.networkConfig = NetworkConfig(
+            allowedURLPrefixes: [AllowedURLEntry("https://people.googleapis.com/")],
+            allowedMethods: [.GET])
+        shell.registerGogCommands()
+
+        // Network is configured but no provider is bound: the GoogleHTTPClient
+        // guard fails closed before any request is made.
+        let run = try await shell.runCapturing("gog me")
+        #expect(run.exitStatus == ExitStatus(7))
+        #expect(run.stderr.contains("no credentials"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

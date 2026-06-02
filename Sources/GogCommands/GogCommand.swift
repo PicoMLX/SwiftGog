@@ -12,7 +12,7 @@ public struct GogCommand: AsyncParsableCommand {
         commandName: "gog",
         abstract: "Google Workspace CLI (sandboxed, SwiftBash-native).",
         version: GogVersionInfo.version,
-        subcommands: [GogVersion.self, GogAuth.self])
+        subcommands: [GogVersion.self, GogMe.self, GogAuth.self])
 
     public init() {}
 }
@@ -40,6 +40,41 @@ struct GogVersion: AsyncParsableCommand {
             Shell.bashCurrent.stdout(line)
         }
     }
+}
+
+/// `gog me` / `gog whoami` — the caller's Google profile via the People API.
+/// The first command to actually hit Google: it exercises `GoogleHTTPClient`
+/// → `SecureFetcher` with the injected bearer token.
+struct GogMe: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "me",
+        abstract: "Show your Google profile.",
+        aliases: ["whoami"])
+
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = URL(string: "https://people.googleapis.com/v1/people/me"
+            + "?personFields=names,emailAddresses")!
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+        } else {
+            let me = try JSONDecoder().decode(PeopleMe.self, from: body)
+            let name = me.names?.first?.displayName ?? "(unknown)"
+            let email = me.emailAddresses?.first?.value ?? ""
+            Shell.bashCurrent.stdout(
+                "\(name)\(email.isEmpty ? "" : " <\(email)>")\n")
+        }
+    }
+}
+
+private struct PeopleMe: Decodable {
+    struct Name: Decodable { let displayName: String? }
+    struct Email: Decodable { let value: String? }
+    let names: [Name]?
+    let emailAddresses: [Email]?
 }
 
 /// `gog auth …` — group. Credentials are host-managed (see PLAN.md); the only
