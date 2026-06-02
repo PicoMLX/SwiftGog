@@ -82,6 +82,21 @@ gog calendar create --summary 'Standup' \
   --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z --dry-run
 ```
 
+## Contacts
+
+```bash
+gog contacts list --max 20 --json
+gog contacts get people/c123 --json
+```
+
+## Tasks
+
+```bash
+gog tasks lists --json
+gog tasks list --list <listId> --json
+gog tasks add 'Buy milk' --list <listId>
+```
+
 ## Discovery
 
 ```bash
@@ -95,5 +110,5 @@ gog version
 
 - With `--json` the output is structured JSON; otherwise it is a compact
   human / TSV form (id, then key fields, tab-separated).
-- This is the MVP surface (identity, Drive, Gmail, Calendar). More services
-  (Docs, Sheets, Contacts, Tasks, …) are planned — see `PLAN.md`.
+- Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks. More services
+  (Docs, Sheets, …) are planned — see `PLAN.md`.
