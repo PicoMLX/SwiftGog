@@ -789,6 +789,52 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains(#"a\nb"# + "\tc"))
     }
 
+    @Test func sheetsGetPadsTrailingEmptyCells() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A1:C1 with only A1 populated must still render three columns.
+        let json = #"{"range":"Sheet1!A1:C1","values":[["x"]]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets get SID 'Sheet1!A1:C1'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("x\t\t"))
+    }
+
+    @Test func sheetsUpdateRejectsOversizedInteger() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets update SID 'A1' --values-json '[[9223372036854775808]]'")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func docsCatValidatesOutBeforeExport() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("doc".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog docs cat DOCID --out /etc/x.txt")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(23))
+        #expect(transport.lastURL == nil)   // export not performed for a bad dest
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

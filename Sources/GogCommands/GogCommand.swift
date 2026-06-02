@@ -955,15 +955,25 @@ struct DocsCat: AsyncParsableCommand {
             "https://www.googleapis.com/drive/v3/files",
             id: "\(documentId)/export",
             query: [URLQueryItem(name: "mimeType", value: mimeType)])
-        // Fetch first; only write the destination after a successful export.
-        let data = try await GoogleHTTPClient().get(url)
         guard let out else {
+            let data = try await GoogleHTTPClient().get(url)
             Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self))
             return
         }
-        let resolved = Shell.bashCurrent.resolvePath(out)
+        // Validate the destination before exporting (probe a sibling so an
+        // existing file isn't truncated), mirroring drive download.
+        let path = Shell.bashCurrent.resolvePath(out)
+        let probe = path + ".gog-precheck"
         do {
-            try await Shell.bashCurrent.fileSystem.writeData(data, to: resolved, append: false)
+            try await Shell.bashCurrent.fileSystem.writeData(Data(), to: probe, append: false)
+            try? await Shell.bashCurrent.fileSystem.remove(probe, recursive: false)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
+            throw ExitCode(23)
+        }
+        let data = try await GoogleHTTPClient().get(url)
+        do {
+            try await Shell.bashCurrent.fileSystem.writeData(data, to: path, append: false)
         } catch {
             Shell.bashCurrent.stderr("gog: cannot write \(out): \(error)\n")
             throw ExitCode(23)
@@ -996,6 +1006,29 @@ private func sheetsValuesURL(spreadsheetId: String, range: String,
         query: query)
 }
 
+/// Column count for an A1 range like "Sheet1!A1:C10" → 3, or nil for a single
+/// cell or an unbounded range (where padding can't be inferred).
+private func sheetsRangeColumnCount(_ range: String?) -> Int? {
+    guard let range else { return nil }
+    let a1 = range.split(separator: "!").last.map(String.init) ?? range
+    let bounds = a1.split(separator: ":", maxSplits: 1).map(String.init)
+    guard bounds.count == 2 else { return nil }
+    func columnIndex(_ cell: String) -> Int? {
+        let letters = cell.prefix { $0.isLetter }.uppercased()
+        guard !letters.isEmpty else { return nil }
+        var index = 0
+        for ch in letters {
+            guard let v = ch.asciiValue, (65...90).contains(v) else { return nil }
+            index = index * 26 + Int(v - 64)
+        }
+        return index
+    }
+    guard let start = columnIndex(bounds[0]), let end = columnIndex(bounds[1]) else {
+        return nil
+    }
+    return max(1, end - start + 1)
+}
+
 /// `gog sheets get <spreadsheetId> <range>` — read a range of values.
 struct SheetsGet: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -1017,16 +1050,20 @@ struct SheetsGet: AsyncParsableCommand {
         let result = try JSONDecoder().decode(ValueRange.self, from: body)
         let rows = result.values ?? []
         if rows.isEmpty { Shell.bashCurrent.stderr("No values\n") }
+        // Sheets omits trailing empty cells; pad to the requested range width (or
+        // the widest returned row) so the TSV keeps a consistent column count.
+        let width = sheetsRangeColumnCount(result.range) ?? (rows.map(\.count).max() ?? 0)
         for row in rows {
             // Escape delimiters so a cell containing a tab/newline can't break
             // the one-row-per-record TSV shape.
-            let cells = row.map { cell in
+            var cells = row.map { cell in
                 cell.text
                     .replacingOccurrences(of: "\\", with: "\\\\")
                     .replacingOccurrences(of: "\t", with: "\\t")
                     .replacingOccurrences(of: "\n", with: "\\n")
                     .replacingOccurrences(of: "\r", with: "\\r")
             }
+            while cells.count < width { cells.append("") }
             Shell.bashCurrent.stdout(cells.joined(separator: "\t") + "\n")
         }
     }
@@ -1089,6 +1126,13 @@ private enum CellValue: Codable {
         } else if let i = try? container.decode(Int.self) {
             self = .int(i)            // exact: avoids Double rounding of large ints
         } else if let n = try? container.decode(Double.self) {
+            // Reject integers beyond exact Double range — they'd round silently;
+            // such values must be quoted as strings.
+            if n.rounded() == n, abs(n) >= 0x1p53 {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Number too large for exact representation; quote it as a string")
+            }
             self = .number(n)
         } else if let s = try? container.decode(String.self) {
             self = .string(s)
