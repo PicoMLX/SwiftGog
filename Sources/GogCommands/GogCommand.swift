@@ -104,7 +104,7 @@ struct GogDrive: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "drive",
         abstract: "Google Drive.",
-        subcommands: [DriveLs.self, DriveGet.self, DriveSearch.self, DriveDownload.self],
+        subcommands: [DriveLs.self, DriveGet.self, DriveSearch.self, DriveDownload.self, DriveUpload.self],
         aliases: ["drv"])
 }
 
@@ -153,6 +153,74 @@ struct DriveLs: AsyncParsableCommand {
 
         let body = try await GoogleHTTPClient().get(comps.url!)
         try emitDriveFileList(body, json: json)
+    }
+}
+
+/// `gog drive upload <path> --name … --parent …` — upload a sandbox file to
+/// Drive via a multipart/related request (metadata + media). Reads the bytes
+/// through `Shell.bashCurrent.fileSystem`, so only sandbox paths are readable.
+struct DriveUpload: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "upload",
+        abstract: "Upload a sandbox file to Drive.",
+        aliases: ["up", "put"])
+
+    @Argument(help: "Path inside the sandbox to upload.") var path: String
+    @Option(name: .long, help: "Name for the uploaded file (defaults to the file name).")
+    var name: String?
+    @Option(name: .long, help: "Parent folder ID.") var parent: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let resolved = Shell.bashCurrent.resolvePath(path)
+        let data: Data
+        do {
+            data = try await Shell.bashCurrent.fileSystem.readData(resolved)
+        } catch {
+            Shell.bashCurrent.stderr("gog: cannot read \(path): \(error)\n")
+            throw ExitCode(2)
+        }
+        let filename = name ?? URL(fileURLWithPath: path).lastPathComponent
+
+        struct Meta: Encodable {
+            let name: String
+            let parents: [String]?
+            enum CodingKeys: String, CodingKey { case name, parents }
+            func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(name, forKey: .name)
+                try container.encodeIfPresent(parents, forKey: .parents)
+            }
+        }
+        let metadata = try JSONEncoder().encode(
+            Meta(name: filename, parents: parent.map { [$0] }))
+
+        let boundary = "gogboundary-\(UInt64.random(in: 0 ... .max))"
+        var multipart = Data()
+        multipart.append(Data("--\(boundary)\r\n".utf8))
+        multipart.append(Data("Content-Type: application/json; charset=UTF-8\r\n\r\n".utf8))
+        multipart.append(metadata)
+        multipart.append(Data("\r\n--\(boundary)\r\n".utf8))
+        multipart.append(Data("Content-Type: application/octet-stream\r\n\r\n".utf8))
+        multipart.append(data)
+        multipart.append(Data("\r\n--\(boundary)--\r\n".utf8))
+
+        let url = try googleURL(
+            "https://www.googleapis.com/upload/drive/v3/files",
+            query: [
+                URLQueryItem(name: "uploadType", value: "multipart"),
+                URLQueryItem(name: "fields", value: "id,name"),
+            ])
+        let result = try await GoogleHTTPClient().post(
+            url, body: multipart,
+            contentType: "multipart/related; boundary=\(boundary)")
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: result)
+        Shell.bashCurrent.stdout("uploaded: \(file.id ?? "")\t\(file.name ?? "")\n")
     }
 }
 

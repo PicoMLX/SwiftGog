@@ -23,8 +23,12 @@ public struct GoogleHTTPClient {
 
     /// Authenticated `POST` with a JSON body.
     public func post(_ url: URL, jsonBody: Data) async throws -> Data {
-        try await perform(method: "POST", url: url, body: jsonBody,
-                          contentType: "application/json")
+        try await post(url, body: jsonBody, contentType: "application/json")
+    }
+
+    /// Authenticated `POST` with an explicit content type (e.g. multipart).
+    public func post(_ url: URL, body: Data, contentType: String) async throws -> Data {
+        try await perform(method: "POST", url: url, body: body, contentType: contentType)
     }
 
     /// Shared flow: bearer token, one `401` → refresh retry, then status

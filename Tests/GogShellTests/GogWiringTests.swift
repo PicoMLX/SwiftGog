@@ -417,6 +417,39 @@ private struct MockTransport: GogTransport {
         #expect(run.exitStatus == .success)
     }
 
+    @Test func driveUploadReadsMountAndPosts() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        try await shell.fileSystem.writeData(Data("hello".utf8), to: "/gog/f.txt", append: false)
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"up1","name":"f.txt"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive upload /gog/f.txt --name f.txt")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("uploaded: up1\tf.txt"))
+    }
+
+    @Test func driveUploadRejectsMissingFile() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        shell.registerGogCommands()
+        // Missing file is caught before any network/credential use.
+        let run = try await shell.runCapturing("gog drive upload /gog/missing.txt")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
