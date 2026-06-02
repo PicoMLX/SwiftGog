@@ -717,7 +717,8 @@ struct GmailThreadGet: AsyncParsableCommand {
 
 /// `gog gmail attachments <messageId>` — list a message's attachments so their
 /// IDs can be fed to `gog gmail attachment`. Walks the full message payload
-/// (recursively) for parts that carry a filename + `body.attachmentId`.
+/// (recursively) for parts that carry a filename; the bytes are then fetched
+/// via `body.attachmentId`, or are inline in `body.data` for small attachments.
 struct GmailAttachments: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "attachments",
@@ -740,10 +741,15 @@ struct GmailAttachments: AsyncParsableCommand {
         var attachments: [GmailAttachmentInfo] = []
         func walk(_ part: GmailFullMessage.Part?) {
             guard let part else { return }
-            if let attachmentId = part.body?.attachmentId, !attachmentId.isEmpty {
+            // An attachment is identified by a non-empty filename. Message body
+            // parts have none — even when Gmail stores a large body under its
+            // own attachmentId — so keying on filename both excludes those and
+            // surfaces small attachments whose bytes are inline in body.data
+            // (attachmentId then empty).
+            if let filename = part.filename, !filename.isEmpty {
                 attachments.append(GmailAttachmentInfo(
-                    attachmentId: attachmentId,
-                    filename: part.filename ?? "",
+                    attachmentId: part.body?.attachmentId ?? "",
+                    filename: filename,
                     mimeType: part.mimeType ?? "",
                     size: part.body?.size))
             }

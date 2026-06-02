@@ -503,6 +503,29 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(!run.stdout.contains("c2VjcmV0"))   // inline body data not leaked
     }
 
+    @Test func gmailAttachmentsUsesFilenameNotAttachmentId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Part A: a message body Gmail stored under its own attachmentId, with
+        //   NO filename -> must be excluded (not a user attachment).
+        // Part B: a real attachment with a filename but inline bytes (no
+        //   attachmentId) -> must be surfaced.
+        let json = #"{"payload":{"parts":[{"mimeType":"text/html","body":{"attachmentId":"bodyABC","size":500}},"#
+            + #"{"filename":"note.txt","mimeType":"text/plain","body":{"data":"aGk","size":2}}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail attachments m1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("note.txt"))    // inline attachment surfaced
+        #expect(!run.stdout.contains("bodyABC"))     // message body not listed
+    }
+
     @Test func calendarEventsRendersRows() async throws {
         let shell = Shell()
         shell.registerGogCommands()
