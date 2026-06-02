@@ -2,36 +2,37 @@ import ArgumentParser
 import Foundation
 import BashInterpreter
 
-/// Minimal authenticated GET client for Google REST APIs, routed entirely
-/// through the SwiftBash sandbox: HTTPS via `SecureFetcher` (allow-list
-/// enforced) and the bearer token from the injected `GogCredentialProvider`.
-/// On a `401` it asks the provider for a refreshed token once — the host owns
-/// the refresh (see the "OAuth token refresh ownership" open question in
-/// PLAN.md).
-///
-/// `fetcher` is a test seam mirroring `CurlCommand.run(argv:fetcher:)`; in
-/// production it is `nil` and a `SecureFetcher` is built from the shell's
-/// `networkConfig` (fail-closed if absent).
+/// Authenticated GETs for Google REST APIs, routed through a `GogTransport`
+/// (production: `SecureTransport` over the sandbox's `SecureFetcher`; tests: a
+/// fake). The bearer token comes from the injected `GogCredentialProvider`; on
+/// a `401` it asks the provider for a refreshed token once — the host owns the
+/// refresh (see PLAN.md "Decisions": Option A).
 ///
 // TODO(phase0): factor the exit-code mapping out into the command layer once
 // there's more than one consumer; for now it mirrors GogRuntime's pattern.
 public struct GoogleHTTPClient {
-    private let injected: SecureFetcher?
+    private let transport: any GogTransport
 
-    public init(fetcher: SecureFetcher? = nil) { self.injected = fetcher }
+    /// `transport` is a test seam; in production it resolves to the task-local
+    /// `GogTransportProvider.current` if set, else a fresh `SecureTransport`.
+    public init(transport: (any GogTransport)? = nil) {
+        self.transport = transport ?? GogTransportProvider.current ?? SecureTransport()
+    }
 
-    /// Authenticated `GET`; returns the response body or throws an
-    /// `ExitCode` (7 = no network / no creds / re-auth required) after
-    /// writing a diagnostic to stderr.
+    /// Authenticated `GET`; returns the response body, or throws an `ExitCode`
+    /// (7 = no creds / no network / re-auth required; 1 = other HTTP ≥ 400)
+    /// after writing a diagnostic to stderr.
     public func get(_ url: URL) async throws -> Data {
         let provider = try GogRuntime.requireCredentials()
-        let fetcher = try resolveFetcher()
         do {
             let token = try await provider.accessToken()
-            var response = try await fetcher.fetch(authorizedGET(url, token: token))
+            var response = try await transport.send(
+                method: "GET", url: url, headers: Self.authHeaders(token), body: nil)
             if response.status == 401 {
                 let refreshed = try await provider.refreshedAccessToken()
-                response = try await fetcher.fetch(authorizedGET(url, token: refreshed))
+                response = try await transport.send(
+                    method: "GET", url: url,
+                    headers: Self.authHeaders(refreshed), body: nil)
             }
             if response.status == 401 {
                 Shell.bashCurrent.stderr(
@@ -49,27 +50,7 @@ public struct GoogleHTTPClient {
         }
     }
 
-    private func authorizedGET(_ url: URL, token: String) -> NetworkRequest {
-        NetworkRequest(
-            url: url,
-            method: "GET",
-            headers: ["Authorization": "Bearer \(token)",
-                      "Accept": "application/json"],
-            body: nil)
-    }
-
-    private func resolveFetcher() throws -> SecureFetcher {
-        if let injected { return injected }
-        guard let config = Shell.bashCurrent.networkConfig else {
-            Shell.bashCurrent.stderr(
-                "gog: (7) network access denied: no network configured\n")
-            throw ExitCode(7)
-        }
-        do {
-            return try SecureFetcher(config: config)
-        } catch let err as NetworkError {
-            Shell.bashCurrent.stderr("gog: (\(err.exitCode)) \(err.description)\n")
-            throw ExitCode(Int32(err.exitCode))
-        }
+    private static func authHeaders(_ token: String) -> [String: String] {
+        ["Authorization": "Bearer \(token)", "Accept": "application/json"]
     }
 }

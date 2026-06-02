@@ -34,26 +34,24 @@
 
 ---
 
-## Open questions (decisions pending)
+## Decisions & open questions
 
-### OAuth token *refresh* ownership — **undecided** (owner TBD)
+### OAuth token *refresh* ownership — **DECIDED 2026-06-02: host refreshes (Option A)**
 
-When an injected access token expires (`gog` gets a `401`), **who performs the OAuth
-refresh?** Recorded here because it is not yet decided ("not sure who can best handle that").
+When an injected access token expires (`gog` gets a `401`), the **host** performs the OAuth
+refresh — `SwiftGog` never calls the token endpoint; it asks the provider for a fresh token
+and retries once. This is **revisit-able**; Option B is kept on record so we don't forget it.
 
-- **Option A — host owns refresh (current default).** `GogCredentialProvider
-  .refreshedAccessToken()` returns a freshly-minted token from the host; `SwiftGog` never
-  calls the token endpoint. The network allow-list stays **API-hosts-only** (no
-  `oauth2.googleapis.com`). `SwiftGog` contains **zero** OAuth.
-- **Option B — `SwiftGog` refreshes.** The host injects a refresh token + client ID/secret;
-  `GogCore` does the `POST https://oauth2.googleapis.com/token` through `SecureFetcher`.
-  This re-adds `oauth2.googleapis.com` to the allow-list (~40 LOC) and widens
-  `GogCredentialProvider` to expose the refresh token + client creds — i.e. a sliver of
-  OAuth comes back into scope.
-
-**Impact of the choice:** the network allow-list hosts, the `GogCredentialProvider` surface,
-and Phase 0 ②. **Until decided, the code assumes Option A** — `refreshedAccessToken()` is
-host-implemented, and its default implementation simply re-returns `accessToken()`.
+- **Option A — host owns refresh (CHOSEN).** `GogCredentialProvider.refreshedAccessToken()`
+  returns a freshly-minted token from the host; `SwiftGog` never calls the token endpoint.
+  The network allow-list stays **API-hosts-only** (no `oauth2.googleapis.com`); `SwiftGog`
+  contains **zero** OAuth. *Implemented:* `GoogleHTTPClient` retries a `401` once with
+  `refreshedAccessToken()`, then exits 7 ("re-auth required") if still rejected.
+- **Option B — `SwiftGog` refreshes (NOT chosen; documented for a possible revisit).** The
+  host injects a refresh token + client ID/secret; `GogCore` does the
+  `POST https://oauth2.googleapis.com/token` through `SecureFetcher`. Revisiting means:
+  re-add `oauth2.googleapis.com` to the allow-list (~40 LOC) and widen
+  `GogCredentialProvider` with the refresh token + client creds.
 
 ---
 
@@ -307,7 +305,7 @@ output mapping for every leaf** — that is the bulk of the work, not the scaffo
 ## Phased roadmap
 
 **Phase 0 — Foundation (gates everything):** ① `GoogleHTTPClient` over `SecureFetcher`
-(+ injectable `NetworkFetcher`); ② `GogCredentialProvider` seam + `GogCredentials` task-local
+(+ injectable `GogTransport`); ② `GogCredentialProvider` seam + `GogCredentials` task-local
 + 401-retry policy; ③ paths→virtual-FS resolver; ④ `OutFmt`; ⑤ `GogShell.registerGogCommands()`
 + root `GogCommand` skeleton; ⑥ `GogSchemaGen`.
 
@@ -332,7 +330,7 @@ inside the sandbox.
 ## Verification
 
 - **Per-command unit tests:** Swift Testing + `CapturingShell` (copy SwiftBash's
-  `Tests/BashCommandKitTests/CapturingShell.swift` pattern) + a **mock `NetworkFetcher`**
+  `Tests/BashCommandKitTests/CapturingShell.swift` pattern) + a **fake `GogTransport`**
   returning canned Google JSON + a **stub `GogCredentialProvider`**;
   `shell.runCapturing("gog drive ls --json")`, assert `stdout`/`stderr`/`exitStatus`.
 - **Output parity:** record real Google responses once → fixtures → replay through the mock

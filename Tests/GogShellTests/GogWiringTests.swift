@@ -12,10 +12,19 @@ private struct StubProvider: GogCredentialProvider {
     func accessToken() async throws -> String { token }
 }
 
-/// Phase-0 wiring proof: `gog` is registered into a sandboxed `Shell`, runs
-/// through `runCapturing`, and honours the fail-closed sandbox contracts.
-/// (The real Google HTTP path is deferred to Phase 0; these tests cover
-/// registration + the deny paths, which need no network.)
+/// A fake transport returning a canned response — exercises command happy
+/// paths without real network.
+private struct MockTransport: GogTransport {
+    let response: HTTPResponse
+    func send(method: String, url: URL,
+              headers: [String: String], body: Data?) async throws -> HTTPResponse {
+        response
+    }
+}
+
+/// Wiring + behaviour tests: `gog` registered into a sandboxed `Shell` and run
+/// through `runCapturing`. Covers the fail-closed sandbox contracts (deny
+/// paths) and command happy paths via an injected fake `GogTransport`.
 @Suite struct GogWiringTests {
 
     @Test func versionRunsThroughTheShell() async throws {
@@ -82,6 +91,76 @@ private struct StubProvider: GogCredentialProvider {
         let run = try await shell.runCapturing("gog me")
         #expect(run.exitStatus == ExitStatus(7))
         #expect(run.stderr.contains("no credentials"))
+    }
+
+    @Test func meDecodesProfile() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"names":[{"displayName":"Ada Lovelace"}],"#
+            + #""emailAddresses":[{"value":"ada@example.com"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog me")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Ada Lovelace"))
+        #expect(run.stdout.contains("ada@example.com"))
+    }
+
+    @Test func meJSONPassesThroughRawBody() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"names":[{"displayName":"Ada"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog me --json")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains(#""displayName":"Ada""#))
+    }
+
+    @Test func driveLsRendersTSV() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"files":[{"id":"abc","name":"Report.pdf","#
+            + #""mimeType":"application/pdf"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("abc\tReport.pdf\tapplication/pdf"))
+    }
+
+    @Test func reauthRequiredWhenTokenRejected() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 401, body: Data()))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog me")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(7))
+        #expect(run.stderr.contains("re-auth required"))
     }
 
     @Test func driveLsRejectsBadMax() async throws {
