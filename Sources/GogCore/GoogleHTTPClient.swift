@@ -2,14 +2,11 @@ import ArgumentParser
 import Foundation
 import BashInterpreter
 
-/// Authenticated GETs for Google REST APIs, routed through a `GogTransport`
+/// Authenticated requests to Google REST APIs, routed through a `GogTransport`
 /// (production: `SecureTransport` over the sandbox's `SecureFetcher`; tests: a
 /// fake). The bearer token comes from the injected `GogCredentialProvider`; on
 /// a `401` it asks the provider for a refreshed token once — the host owns the
 /// refresh (see PLAN.md "Decisions": Option A).
-///
-// TODO(phase0): factor the exit-code mapping out into the command layer once
-// there's more than one consumer; for now it mirrors GogRuntime's pattern.
 public struct GoogleHTTPClient {
     private let transport: any GogTransport
 
@@ -19,20 +16,38 @@ public struct GoogleHTTPClient {
         self.transport = transport ?? GogTransportProvider.current ?? SecureTransport()
     }
 
-    /// Authenticated `GET`; returns the response body, or throws an `ExitCode`
-    /// (7 = no creds / no network / re-auth required; 1 = other HTTP ≥ 400)
-    /// after writing a diagnostic to stderr.
+    /// Authenticated `GET`.
     public func get(_ url: URL) async throws -> Data {
+        try await perform(method: "GET", url: url, body: nil, contentType: nil)
+    }
+
+    /// Authenticated `POST` with a JSON body.
+    public func post(_ url: URL, jsonBody: Data) async throws -> Data {
+        try await perform(method: "POST", url: url, body: jsonBody,
+                          contentType: "application/json")
+    }
+
+    /// Shared flow: bearer token, one `401` → refresh retry, then status
+    /// mapping. Returns the body, or throws an `ExitCode` (7 = no creds /
+    /// re-auth required; 1 = other HTTP ≥ 400) after writing a diagnostic to
+    /// stderr.
+    private func perform(method: String, url: URL,
+                         body: Data?, contentType: String?) async throws -> Data {
         let provider = try GogRuntime.requireCredentials()
+        func headers(_ token: String) -> [String: String] {
+            var headers = ["Authorization": "Bearer \(token)",
+                           "Accept": "application/json"]
+            if let contentType { headers["Content-Type"] = contentType }
+            return headers
+        }
         do {
             let token = try await provider.accessToken()
             var response = try await transport.send(
-                method: "GET", url: url, headers: Self.authHeaders(token), body: nil)
+                method: method, url: url, headers: headers(token), body: body)
             if response.status == 401 {
                 let refreshed = try await provider.refreshedAccessToken()
                 response = try await transport.send(
-                    method: "GET", url: url,
-                    headers: Self.authHeaders(refreshed), body: nil)
+                    method: method, url: url, headers: headers(refreshed), body: body)
             }
             if response.status == 401 {
                 Shell.bashCurrent.stderr(
@@ -48,9 +63,5 @@ public struct GoogleHTTPClient {
             Shell.bashCurrent.stderr("gog: (\(err.exitCode)) \(err.description)\n")
             throw ExitCode(Int32(err.exitCode))
         }
-    }
-
-    private static func authHeaders(_ token: String) -> [String: String] {
-        ["Authorization": "Bearer \(token)", "Accept": "application/json"]
     }
 }

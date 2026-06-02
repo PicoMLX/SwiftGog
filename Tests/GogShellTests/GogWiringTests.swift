@@ -295,6 +295,47 @@ private struct MockTransport: GogTransport {
         #expect(run.stdout.contains("From: a@b.com"))
     }
 
+    @Test func gmailSendDryRunDoesNotSend() async throws {
+        // --dry-run short-circuits before any network/credential use.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog gmail send --to a@b.com --subject Hi --body Yo --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("a@b.com"))
+        #expect(run.stdout.contains("Hi"))
+    }
+
+    @Test func gmailSendBlockedByHostPolicy() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(gmailSendDisabled: true)
+        ) {
+            try await shell.runCapturing(
+                "gog gmail send --to a@b.com --subject Hi --body Yo")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("disabled by host policy"))
+    }
+
+    @Test func gmailSendPostsAndReportsId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"sent123"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog gmail send --to a@b.com --subject Hi --body Yo")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("sent: sent123"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],

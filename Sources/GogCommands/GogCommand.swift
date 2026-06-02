@@ -258,7 +258,7 @@ struct GogGmail: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gmail",
         abstract: "Gmail.",
-        subcommands: [GmailMessages.self, GmailGet.self],
+        subcommands: [GmailMessages.self, GmailGet.self, GmailSend.self],
         aliases: ["mail", "email"])
 }
 
@@ -340,6 +340,68 @@ struct GmailGet: AsyncParsableCommand {
         if let snippet = message.snippet, !snippet.isEmpty {
             Shell.bashCurrent.stdout("\n\(snippet)\n")
         }
+    }
+}
+
+/// `gog gmail send --to … --subject … --body …` — send a plain-text email.
+/// Honours the host send policy (`GogPolicies`) and `--dry-run`.
+struct GmailSend: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "send",
+        abstract: "Send a plain-text email.")
+
+    @Option(name: .long, help: "Recipient email address.") var to: String
+    @Option(name: .long, help: "Subject line.") var subject: String = ""
+    @Option(name: [.customShort("b"), .long], help: "Message body (plain text).")
+    var body: String = ""
+    @Flag(name: .long, help: "Build the message but do not send it.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit the raw send result JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        // Host policy gate (the SwiftBash form of --gmail-no-send).
+        if GogPolicies.current.gmailSendDisabled {
+            Shell.bashCurrent.stderr("gog: sending is disabled by host policy\n")
+            throw ExitCode(3)
+        }
+        let mime = "To: \(to)\r\n"
+            + "Subject: \(subject)\r\n"
+            + "Content-Type: text/plain; charset=UTF-8\r\n\r\n"
+            + body
+        let mimeData = Data(mime.utf8)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not sending\n")
+            Shell.bashCurrent.stdout(
+                "To: \(to)\nSubject: \(subject)\n(\(mimeData.count) bytes)\n")
+            return
+        }
+        let payload = try JSONEncoder().encode(
+            ["raw": mimeData.base64URLEncodedString()])
+        let url = URL(
+            string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/send")!
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let sent = try JSONDecoder().decode(GmailSendResult.self, from: result)
+        Shell.bashCurrent.stdout("sent: \(sent.id ?? "")\n")
+    }
+}
+
+private struct GmailSendResult: Decodable {
+    let id: String?
+    let threadId: String?
+}
+
+private extension Data {
+    /// Gmail's `raw` field wants unpadded base64url.
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 
