@@ -1424,13 +1424,19 @@ struct FormsResponses: AsyncParsableCommand {
         abstract: "List a form's responses.")
 
     @Argument(help: "Form ID.") var formId: String
+    @Option(name: .long, help: "Maximum responses to return (1–5000).")
+    var max: Int = 100
     @Option(name: .long, help: "Page token from a previous listing.")
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
 
     func run() async throws {
-        var query: [URLQueryItem] = []
+        guard max > 0, max <= 5000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 5000\n")
+            throw ExitCode(2)
+        }
+        var query = [URLQueryItem(name: "pageSize", value: String(max))]
         if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
         let url = try googleURL(
             "https://forms.googleapis.com/v1/forms", id: "\(formId)/responses",

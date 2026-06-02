@@ -1002,6 +1002,13 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("r1\t2026-06-02T00:00:00Z"))
     }
 
+    @Test func formsResponsesRejectsBadMax() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog forms responses FID --max 0")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
     @Test func gmailLabelsRenders() async throws {
         let shell = Shell()
         shell.registerGogCommands()
