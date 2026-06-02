@@ -1100,6 +1100,142 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == ExitStatus(2))
     }
 
+    @Test func adminUsersRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"users":[{"primaryEmail":"alice@x.com","#
+            + #""name":{"fullName":"Alice A"},"suspended":false}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin users")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("alice@x.com\tAlice A\tactive"))
+    }
+
+    @Test func adminUsersDefaultsToMyCustomer() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"users":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin users")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("/admin/directory/v1/users"))
+        #expect(url.contains("customer=my_customer"))
+    }
+
+    @Test func adminUsersRejectsBadMax() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog admin users --max 0")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func adminUserGetRendersAdminFlag() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"primaryEmail":"alice@x.com","name":{"fullName":"Alice A"},"#
+            + #""isAdmin":true,"orgUnitPath":"/Sales"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin user alice@x.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Alice A <alice@x.com>"))
+        #expect(run.stdout.contains("orgUnit=/Sales"))
+        #expect(run.stdout.contains("admin"))
+    }
+
+    @Test func adminGroupsRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"groups":[{"email":"eng@x.com","name":"Engineering","#
+            + #""directMembersCount":"3"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin groups")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("eng@x.com\tEngineering\tmembers=3"))
+    }
+
+    @Test func adminGroupsForUserUsesUserKey() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"groups":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin groups --user alice@x.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        // --user means "groups this user belongs to": userKey, not customer.
+        #expect(url.contains("userKey=alice"))
+        #expect(!url.contains("customer="))
+    }
+
+    @Test func adminMembersRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"members":[{"email":"bob@x.com","role":"OWNER","type":"USER"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin members eng@x.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("bob@x.com\tOWNER\tUSER"))
+    }
+
+    @Test func adminMembersEncodesSlashInGroupKey() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"members":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin members 'a/b@x.com'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        // A "/" inside the key must be encoded so it can't add a path segment.
+        #expect(url.contains("a%2Fb"))
+        #expect(url.contains("/members"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
