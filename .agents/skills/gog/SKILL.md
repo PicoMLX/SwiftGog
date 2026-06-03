@@ -187,7 +187,11 @@ gog admin member-remove eng@example.com bob@example.com
 ```
 
 These directory **writes are high-blast-radius and gated**: they refuse with
-exit 3 unless the host has enabled admin writes. Always `--dry-run` first.
+exit 3 unless the host has enabled admin writes. Always `--dry-run` first. The
+host token also needs the **write** Directory scopes (the read-only scopes are
+not enough): `…/auth/admin.directory.user` for suspend/unsuspend, and
+`…/auth/admin.directory.group.member` (or `…/admin.directory.group`) for
+member-add/remove — otherwise Google returns 403.
 
 ## Discovery
 

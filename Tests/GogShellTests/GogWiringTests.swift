@@ -1696,6 +1696,20 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == ExitStatus(2))
     }
 
+    @Test func adminMemberAddRejectsNonEmail() async throws {
+        // members.insert needs an email; a bare id must be rejected up front.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(adminWriteDisabled: false)
+        ) {
+            try await shell.runCapturing(
+                "gog admin member-add eng@x.com someUserId123 --dry-run")
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("needs an email"))
+    }
+
     @Test func adminMemberRemoveDeletesWhenEnabled() async throws {
         let shell = Shell()
         shell.registerGogCommands()

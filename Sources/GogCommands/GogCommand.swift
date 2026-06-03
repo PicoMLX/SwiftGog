@@ -2384,7 +2384,8 @@ struct AdminMemberAdd: AsyncParsableCommand {
         abstract: "Add a member to a group (gated; --dry-run to preview).")
 
     @Argument(help: "Group key: email or unique id.") var groupKey: String
-    @Argument(help: "Member email (or id) to add.") var member: String
+    @Argument(help: "Member email address to add (members.insert needs an email, not an id).")
+    var member: String
     @Option(name: .long, help: "Role: MEMBER, MANAGER, or OWNER.") var role: String = "MEMBER"
     @Flag(name: .long, help: "Build the request but do not apply it.")
     var dryRun: Bool = false
@@ -2393,6 +2394,14 @@ struct AdminMemberAdd: AsyncParsableCommand {
 
     func run() async throws {
         try requireAdminWrite()
+        // members.insert requires the member's email (a bare id is read-only and
+        // only valid as the URI key for get/remove/update) — fail fast with a hint.
+        guard member.contains("@") else {
+            Shell.bashCurrent.stderr(
+                "gog: member-add needs an email address, not an id "
+                    + "(an id only works for member-remove)\n")
+            throw ExitCode(2)
+        }
         let normalizedRole = role.uppercased()
         guard ["MEMBER", "MANAGER", "OWNER"].contains(normalizedRole) else {
             Shell.bashCurrent.stderr("gog: --role must be MEMBER, MANAGER, or OWNER\n")
