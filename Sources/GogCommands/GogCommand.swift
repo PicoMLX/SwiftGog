@@ -2298,13 +2298,149 @@ private struct YTPlaylist: Decodable { let id: String?; let snippet: YTSnippet? 
 struct GogAdmin: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "admin",
-        abstract: "Admin SDK Directory + Reports — read-only.",
+        abstract: "Admin SDK Directory + Reports (reads; gated writes).",
         subcommands: [
             AdminUsers.self, AdminUser.self,
             AdminGroups.self, AdminGroup.self, AdminMembers.self,
             AdminActivities.self,
+            AdminSuspend.self, AdminUnsuspend.self,
+            AdminMemberAdd.self, AdminMemberRemove.self,
         ],
         aliases: ["directory"])
+}
+
+/// Host write-policy gate for the `gog admin` mutations. These directory
+/// changes are high-blast-radius, so they are disabled unless the host opts in
+/// (`GogPolicy.adminWriteDisabled == false`); otherwise they exit 3 — the same
+/// fail-closed shape as `gmail send` / `chat send`.
+private func requireAdminWrite() throws {
+    if GogPolicies.current.adminWriteDisabled {
+        Shell.bashCurrent.stderr(
+            "gog: admin write commands are disabled by host policy\n")
+        throw ExitCode(3)
+    }
+}
+
+/// `gog admin suspend <userKey>` — suspend a user (gated mutation).
+struct AdminSuspend: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "suspend",
+        abstract: "Suspend a user (gated; --dry-run to preview).")
+
+    @Argument(help: "User key: primary email or unique id.") var userKey: String
+    @Flag(name: .long, help: "Build the request but do not apply it.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try await adminSetSuspended(userKey, suspended: true, dryRun: dryRun, json: json)
+    }
+}
+
+/// `gog admin unsuspend <userKey>` — restore a suspended user (gated mutation).
+struct AdminUnsuspend: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "unsuspend",
+        abstract: "Un-suspend a user (gated; --dry-run to preview).")
+
+    @Argument(help: "User key: primary email or unique id.") var userKey: String
+    @Flag(name: .long, help: "Build the request but do not apply it.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try await adminSetSuspended(userKey, suspended: false, dryRun: dryRun, json: json)
+    }
+}
+
+/// Shared `users.patch` for (un)suspending a user behind the write gate.
+private func adminSetSuspended(_ userKey: String, suspended: Bool,
+                               dryRun: Bool, json: Bool) async throws {
+    try requireAdminWrite()
+    let payload = try JSONEncoder().encode(["suspended": suspended])
+    let verb = suspended ? "suspend" : "unsuspend"
+    if dryRun {
+        Shell.bashCurrent.stderr("dry-run: not modifying\n")
+        Shell.bashCurrent.stdout(
+            "\(verb) \(userKey): PATCH \(String(decoding: payload, as: UTF8.self))\n")
+        return
+    }
+    let url = try googleURL(
+        "https://admin.googleapis.com/admin/directory/v1/users/\(pathSegment(userKey))")
+    let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+    if json {
+        Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+        return
+    }
+    Shell.bashCurrent.stdout("\(suspended ? "suspended" : "unsuspended"): \(userKey)\n")
+}
+
+/// `gog admin member-add <groupKey> <member>` — add a member to a group (gated).
+struct AdminMemberAdd: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "member-add",
+        abstract: "Add a member to a group (gated; --dry-run to preview).")
+
+    @Argument(help: "Group key: email or unique id.") var groupKey: String
+    @Argument(help: "Member email (or id) to add.") var member: String
+    @Option(name: .long, help: "Role: MEMBER, MANAGER, or OWNER.") var role: String = "MEMBER"
+    @Flag(name: .long, help: "Build the request but do not apply it.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireAdminWrite()
+        let normalizedRole = role.uppercased()
+        guard ["MEMBER", "MANAGER", "OWNER"].contains(normalizedRole) else {
+            Shell.bashCurrent.stderr("gog: --role must be MEMBER, MANAGER, or OWNER\n")
+            throw ExitCode(2)
+        }
+        let payload = try JSONEncoder().encode(["email": member, "role": normalizedRole])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not modifying\n")
+            Shell.bashCurrent.stdout(
+                "add to \(groupKey): POST \(String(decoding: payload, as: UTF8.self))\n")
+            return
+        }
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/directory/v1/groups/"
+                + "\(pathSegment(groupKey))/members")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("added \(member) to \(groupKey) as \(normalizedRole)\n")
+    }
+}
+
+/// `gog admin member-remove <groupKey> <member>` — remove a member (gated).
+struct AdminMemberRemove: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "member-remove",
+        abstract: "Remove a member from a group (gated; --dry-run to preview).")
+
+    @Argument(help: "Group key: email or unique id.") var groupKey: String
+    @Argument(help: "Member key: email or id to remove.") var member: String
+    @Flag(name: .long, help: "Build the request but do not apply it.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        try requireAdminWrite()
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not modifying\n")
+            Shell.bashCurrent.stdout("remove from \(groupKey): DELETE member \(member)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://admin.googleapis.com/admin/directory/v1/groups/"
+                + "\(pathSegment(groupKey))/members/\(pathSegment(member))")
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("removed \(member) from \(groupKey)\n")
+    }
 }
 
 /// `gog admin users` — list directory users (defaults to the admin's customer).

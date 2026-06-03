@@ -1641,6 +1641,81 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == ExitStatus(2))
     }
 
+    @Test func adminSuspendDisabledByDefault() async throws {
+        // Default policy disables admin writes; suspend must exit 3 before any
+        // network, even with no policy explicitly bound.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog admin suspend alice@x.com")
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("disabled by host policy"))
+    }
+
+    @Test func adminSuspendDryRunWhenEnabled() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Writes enabled by host; --dry-run previews without any network.
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(adminWriteDisabled: false)
+        ) {
+            try await shell.runCapturing("gog admin suspend alice@x.com --dry-run")
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("suspend alice@x.com"))
+        #expect(run.stdout.contains(#""suspended":true"#))
+    }
+
+    @Test func adminSuspendPatchesWhenEnabled() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200, body: Data(#"{"primaryEmail":"alice@x.com"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogPolicies.$current.withValue(GogPolicy(adminWriteDisabled: false)) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog admin suspend alice@x.com")
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("suspended: alice@x.com"))
+    }
+
+    @Test func adminMemberAddRejectsBadRole() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(adminWriteDisabled: false)
+        ) {
+            try await shell.runCapturing(
+                "gog admin member-add eng@x.com bob@x.com --role FOO")
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func adminMemberRemoveDeletesWhenEnabled() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 204, body: Data()))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogPolicies.$current.withValue(GogPolicy(adminWriteDisabled: false)) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing(
+                        "gog admin member-remove eng@x.com bob@x.com")
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastURL?.absoluteString.contains("/members/bob@x.com") == true)
+        #expect(run.stdout.contains("removed bob@x.com from eng@x.com"))
+    }
+
     @Test func writesOutsideTheMountAreRejected() async throws {
         let mounted = MountedFileSystem(
             mounts: [.init(virtual: "/gog", host: "/gog")],
