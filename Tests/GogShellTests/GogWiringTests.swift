@@ -270,6 +270,61 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stderr.contains("next page token: more"))
     }
 
+    @Test func failEmptyTreatsOmittedArrayAsEmptyInJsonMode() async throws {
+        // Sheets omits `values` entirely for an empty range; --json --fail-empty
+        // must still exit 3, matching the non-JSON `values ?? []` path.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200,
+                body: Data(#"{"range":"Sheet1!A1:B2","majorDimension":"ROWS"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets get sheet1 A1:B2 --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func failEmptyChecksResultArrayNotSiblingInJsonMode() async throws {
+        // Calendar event listings carry a sibling `defaultReminders` array; an
+        // empty sibling next to a non-empty `items` must NOT count as empty.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200,
+                body: Data(#"{"defaultReminders":[],"items":[{"id":"e1"}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar events --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == .success)
+    }
+
+    @Test func driveSearchRequestsNextPageToken() async throws {
+        // DriveSearch's field mask must include nextPageToken so the
+        // pagination-aware --fail-empty guard can see when more pages exist.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        _ = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive search report --json")
+            }
+        }
+        #expect(transport.lastURL?.absoluteString.contains("nextPageToken") == true)
+    }
+
     @Test func driveLsRejectsBadMax() async throws {
         // Validation happens before any network/credential use, so this needs
         // neither — exit 2 with a usage diagnostic.
