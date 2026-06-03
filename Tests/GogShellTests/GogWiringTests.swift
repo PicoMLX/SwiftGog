@@ -814,6 +814,25 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stderr.contains("backoff"))
     }
 
+    @Test func httpErrorHintsApiHostWithTrailingPunctuation() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The API host sits at a sentence end ("…gmail.googleapis.com.") — the
+        // trailing dot must not defeat host matching.
+        let body = #"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Gmail API has not been used in project 9 before or it is disabled. Enable gmail.googleapis.com.","errors":[{"reason":"accessNotConfigured"}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 403, body: Data(body.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail messages")
+            }
+        }
+        #expect(run.exitStatus != .success)
+        #expect(run.stderr.contains("Gmail API is not enabled"))
+    }
+
     @Test func driveGetEscapesUnsafeId() async throws {
         // A space/slash in the id would crash a force-unwrapped URL; the
         // percent-encoding path must keep it a normal request.

@@ -45,7 +45,8 @@ enum GoogleAPIError {
         let message = inner?.message ?? ""
         let reason = inner?.errors?.first?.reason ?? inner?.status ?? ""
         var haystack = message.lowercased()
-        for item in inner?.errors ?? [] { haystack += " " + (item.message ?? "").lowercased() }
+        let extra = (inner?.errors ?? []).compactMap { $0.message?.lowercased() }
+        if !extra.isEmpty { haystack += " " + extra.joined(separator: " ") }
 
         // 1) API not enabled (403 + accessNotConfigured / "has not been used").
         if status == 403, isDisabled(reason: reason, haystack: haystack),
@@ -103,8 +104,16 @@ enum GoogleAPIError {
     private static func apiHost(in haystack: String) -> String? {
         for token in haystack.split(whereSeparator: {
             !($0.isLetter || $0.isNumber || $0 == "." || $0 == "-")
-        }) where token.hasSuffix(".googleapis.com") {
-            return String(token)
+        }) {
+            // Strip trailing sentence punctuation the split keeps (e.g. "…com.").
+            var trimmed = token
+            while trimmed.hasSuffix(".") || trimmed.hasSuffix("-") {
+                trimmed = trimmed.dropLast()
+            }
+            // ".googleapis.com" is 15 chars; require a non-empty subdomain.
+            if trimmed.hasSuffix(".googleapis.com"), trimmed.count > 15 {
+                return String(trimmed)
+            }
         }
         return nil
     }
