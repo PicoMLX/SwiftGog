@@ -41,6 +41,7 @@ small, documented scheme and keep it stable, e.g.:
 | code | meaning |
 | ---- | ------- |
 | 0 | success |
+| 1 | general / unclassified runtime error (the fallback when nothing more specific fits) |
 | 2 | usage / bad input (the model can fix the command) |
 | 3 | refused by policy (a gate; not a retry) |
 | 7 | fail-closed: missing/invalid auth or no network (escalate, don't retry) |
@@ -66,8 +67,10 @@ hints, progress, "no results", and errors go to **stderr**. The model can then
 
 ### 6. Signal "empty" explicitly — don't return silence
 An empty result is ambiguous (did it work? did the filter match nothing?). Emit a
-short `No results` to stderr, and offer a `--fail-empty` flag (exit non-zero when
-empty) so a script can branch without parsing the payload.
+short `No results` to **stderr**. Crucially, under `--json` still print a valid
+empty container (`[]` or `{}`) to **stdout** — silence makes `jq` and JSON
+decoders downstream fail on empty input. Also offer a `--fail-empty` flag (exit
+non-zero when empty) so a script can branch without parsing the payload.
 
 ### 7. Preview and gate mutations
 Give destructive/outbound actions a `--dry-run` that prints the exact request
