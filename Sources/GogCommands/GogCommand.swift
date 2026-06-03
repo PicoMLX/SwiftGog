@@ -23,6 +23,20 @@ func emitEmpty(_ label: String, failEmpty: Bool) throws {
     if failEmpty { throw ExitCode(3) }
 }
 
+/// Best-effort empty check for `--json` mode: does a Google list response carry
+/// an empty array *and* no `nextPageToken`? Lets `--json --fail-empty` honour the
+/// exit-3 contract without decoding each response's specific type. A next page,
+/// or no array at all, ⇒ `false` (don't fail).
+func jsonListingExhaustedAndEmpty(_ body: Data) -> Bool {
+    guard let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+    else { return false }
+    if obj["nextPageToken"] != nil { return false }
+    for value in obj.values {
+        if let array = value as? [Any] { return array.isEmpty }
+    }
+    return false
+}
+
 /// Build a Google API URL from a constant base, an optional path-escaped id,
 /// and query items. Never force-unwraps, so a hostile id can't crash the
 /// process — it fails with exit 2 instead.
@@ -281,11 +295,12 @@ private struct DriveFileList: Decodable {
 private func emitDriveFileList(_ body: Data, json: Bool, failEmpty: Bool) throws {
     if json {
         Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+        if failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
         return
     }
     let listing = try JSONDecoder().decode(DriveFileList.self, from: body)
     let files = listing.files ?? []
-    if files.isEmpty { try emitEmpty("files", failEmpty: failEmpty) }
+    if files.isEmpty { try emitEmpty("files", failEmpty: failEmpty && listing.nextPageToken == nil) }
     for file in files {
         Shell.bashCurrent.stdout(
             "\(file.id ?? "")\t\(file.name ?? "")\t\(file.mimeType ?? "")\n")
@@ -427,11 +442,12 @@ struct DrivePermissions: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DrivePermissionList.self, from: body)
         let permissions = list.permissions ?? []
-        if permissions.isEmpty { try emitEmpty("permissions", failEmpty: failEmptyFlag.failEmpty) }
+        if permissions.isEmpty { try emitEmpty("permissions", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for perm in permissions {
             let who = perm.emailAddress ?? perm.domain ?? perm.displayName ?? ""
             Shell.bashCurrent.stdout(
@@ -480,11 +496,12 @@ struct DriveRevisions: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DriveRevisionList.self, from: body)
         let revisions = list.revisions ?? []
-        if revisions.isEmpty { try emitEmpty("revisions", failEmpty: failEmptyFlag.failEmpty) }
+        if revisions.isEmpty { try emitEmpty("revisions", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for rev in revisions {
             let who = rev.lastModifyingUser?.displayName ?? ""
             Shell.bashCurrent.stdout(
@@ -608,11 +625,12 @@ struct GmailMessages: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(comps.url!)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(GmailMessageList.self, from: body)
         let messages = list.messages ?? []
-        if messages.isEmpty { try emitEmpty("messages", failEmpty: failEmptyFlag.failEmpty) }
+        if messages.isEmpty { try emitEmpty("messages", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for message in messages {
             Shell.bashCurrent.stdout("\(message.id ?? "")\t\(message.threadId ?? "")\n")
         }
@@ -791,11 +809,12 @@ struct GmailDrafts: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(GmailDraftList.self, from: body)
         let drafts = list.drafts ?? []
-        if drafts.isEmpty { try emitEmpty("drafts", failEmpty: failEmptyFlag.failEmpty) }
+        if drafts.isEmpty { try emitEmpty("drafts", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for draft in drafts {
             Shell.bashCurrent.stdout("\(draft.id ?? "")\t\(draft.message?.id ?? "")\n")
         }
@@ -861,11 +880,12 @@ struct GmailThreads: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(GmailThreadList.self, from: body)
         let threads = list.threads ?? []
-        if threads.isEmpty { try emitEmpty("threads", failEmpty: failEmptyFlag.failEmpty) }
+        if threads.isEmpty { try emitEmpty("threads", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for thread in threads {
             Shell.bashCurrent.stdout(
                 "\(thread.id ?? "")\t\(tsvEscaped(thread.snippet ?? ""))\n")
@@ -898,6 +918,7 @@ struct GmailThreadGet: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let thread = try JSONDecoder().decode(GmailThread.self, from: body)
@@ -963,6 +984,7 @@ struct GmailAttachments: AsyncParsableCommand {
         if json {
             let encoded = try JSONEncoder().encode(["attachments": attachments])
             Shell.bashCurrent.stdout(String(decoding: encoded, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, attachments.isEmpty { throw ExitCode(3) }
             return
         }
         if attachments.isEmpty { try emitEmpty("attachments", failEmpty: failEmptyFlag.failEmpty) }
@@ -1106,11 +1128,12 @@ struct CalendarEvents: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(comps.url!)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(CalEventList.self, from: body)
         let items = list.items ?? []
-        if items.isEmpty { try emitEmpty("events", failEmpty: failEmptyFlag.failEmpty) }
+        if items.isEmpty { try emitEmpty("events", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for event in items {
             Shell.bashCurrent.stdout(
                 "\(event.id ?? "")\t\(event.when)\t\(event.summary ?? "")\n")
@@ -1226,11 +1249,12 @@ struct CalendarCalendars: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(CalListResponse.self, from: body)
         let calendars = list.items ?? []
-        if calendars.isEmpty { try emitEmpty("calendars", failEmpty: failEmptyFlag.failEmpty) }
+        if calendars.isEmpty { try emitEmpty("calendars", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for cal in calendars {
             let primary = (cal.primary == true) ? "\tprimary" : ""
             Shell.bashCurrent.stdout(
@@ -1300,6 +1324,12 @@ struct CalendarFreeBusy: AsyncParsableCommand {
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty {
+                let decoded = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
+                let anyBusy = (decoded.calendars ?? [:]).values
+                    .contains { !($0.busy ?? []).isEmpty }
+                if !anyBusy { throw ExitCode(3) }
+            }
             return
         }
         let response = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
@@ -1386,11 +1416,12 @@ struct ContactsList: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ContactList.self, from: body)
         let people = list.connections ?? []
-        if people.isEmpty { try emitEmpty("contacts", failEmpty: failEmptyFlag.failEmpty) }
+        if people.isEmpty { try emitEmpty("contacts", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for person in people {
             let name = person.names?.first?.displayName ?? ""
             let email = person.emailAddresses?.first?.value ?? ""
@@ -1485,6 +1516,7 @@ struct ContactsSearch: AsyncParsableCommand {
         let body = try await client.get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let response = try JSONDecoder().decode(ContactSearchResults.self, from: body)
@@ -1527,11 +1559,12 @@ struct ContactsOther: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(OtherContactList.self, from: body)
         let people = list.otherContacts ?? []
-        if people.isEmpty { try emitEmpty("other contacts", failEmpty: failEmptyFlag.failEmpty) }
+        if people.isEmpty { try emitEmpty("other contacts", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for person in people {
             let name = person.names?.first?.displayName ?? ""
             let email = person.emailAddresses?.first?.value ?? ""
@@ -1590,11 +1623,12 @@ struct TasksLists: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let result = try JSONDecoder().decode(TaskListCollection.self, from: body)
         let lists = result.items ?? []
-        if lists.isEmpty { try emitEmpty("task lists", failEmpty: failEmptyFlag.failEmpty) }
+        if lists.isEmpty { try emitEmpty("task lists", failEmpty: failEmptyFlag.failEmpty && result.nextPageToken == nil) }
         for list in lists {
             Shell.bashCurrent.stdout("\(list.id ?? "")\t\(list.title ?? "")\n")
         }
@@ -1633,11 +1667,12 @@ struct TasksList: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let result = try JSONDecoder().decode(TaskCollection.self, from: body)
         let tasks = result.items ?? []
-        if tasks.isEmpty { try emitEmpty("tasks", failEmpty: failEmptyFlag.failEmpty) }
+        if tasks.isEmpty { try emitEmpty("tasks", failEmpty: failEmptyFlag.failEmpty && result.nextPageToken == nil) }
         for task in tasks {
             Shell.bashCurrent.stdout("\(task.id ?? "")\t\(task.status ?? "")\t\(task.title ?? "")\n")
         }
@@ -1830,6 +1865,7 @@ struct SheetsGet: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let result = try JSONDecoder().decode(ValueRange.self, from: body)
@@ -2053,11 +2089,12 @@ struct ChatSpaces: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ChatSpaceList.self, from: body)
         let spaces = list.spaces ?? []
-        if spaces.isEmpty { try emitEmpty("spaces", failEmpty: failEmptyFlag.failEmpty) }
+        if spaces.isEmpty { try emitEmpty("spaces", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for space in spaces {
             Shell.bashCurrent.stdout(
                 "\(space.name ?? "")\t\(tsvEscaped(space.displayName ?? ""))\n")
@@ -2095,11 +2132,12 @@ struct ChatMessages: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ChatMessageList.self, from: body)
         let messages = list.messages ?? []
-        if messages.isEmpty { try emitEmpty("messages", failEmpty: failEmptyFlag.failEmpty) }
+        if messages.isEmpty { try emitEmpty("messages", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for message in messages {
             Shell.bashCurrent.stdout(
                 "\(message.name ?? "")\t\(tsvEscaped(message.text ?? ""))\n")
@@ -2225,11 +2263,12 @@ struct FormsResponses: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(FormResponseList.self, from: body)
         let responses = list.responses ?? []
-        if responses.isEmpty { try emitEmpty("responses", failEmpty: failEmptyFlag.failEmpty) }
+        if responses.isEmpty { try emitEmpty("responses", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for response in responses {
             Shell.bashCurrent.stdout(
                 "\(response.responseId ?? "")\t\(response.createTime ?? "")\n")
@@ -2270,6 +2309,7 @@ struct GmailLabels: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(LabelList.self, from: body)
@@ -2360,11 +2400,12 @@ struct YouTubeSearch: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(YTSearchList.self, from: body)
         let results = list.items ?? []
-        if results.isEmpty { try emitEmpty("results", failEmpty: failEmptyFlag.failEmpty) }
+        if results.isEmpty { try emitEmpty("results", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for item in results {
             Shell.bashCurrent.stdout(
                 "\(item.id?.videoId ?? "")\t\(tsvEscaped(item.snippet?.title ?? ""))\n")
@@ -2403,11 +2444,12 @@ struct YouTubePlaylists: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(YTPlaylistList.self, from: body)
         let playlists = list.items ?? []
-        if playlists.isEmpty { try emitEmpty("playlists", failEmpty: failEmptyFlag.failEmpty) }
+        if playlists.isEmpty { try emitEmpty("playlists", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for playlist in playlists {
             Shell.bashCurrent.stdout(
                 "\(playlist.id ?? "")\t\(tsvEscaped(playlist.snippet?.title ?? ""))\n")
@@ -2643,11 +2685,12 @@ struct AdminUsers: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DirUserList.self, from: body)
         let users = list.users ?? []
-        if users.isEmpty { try emitEmpty("users", failEmpty: failEmptyFlag.failEmpty) }
+        if users.isEmpty { try emitEmpty("users", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for user in users {
             let status = (user.suspended ?? false) ? "suspended" : "active"
             Shell.bashCurrent.stdout(
@@ -2726,11 +2769,12 @@ struct AdminGroups: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DirGroupList.self, from: body)
         let groups = list.groups ?? []
-        if groups.isEmpty { try emitEmpty("groups", failEmpty: failEmptyFlag.failEmpty) }
+        if groups.isEmpty { try emitEmpty("groups", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for group in groups {
             Shell.bashCurrent.stdout(
                 "\(group.email ?? "")\t\(tsvEscaped(group.name ?? ""))\tmembers=\(group.directMembersCount ?? "0")\n")
@@ -2800,11 +2844,12 @@ struct AdminMembers: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DirMemberList.self, from: body)
         let members = list.members ?? []
-        if members.isEmpty { try emitEmpty("members", failEmpty: failEmptyFlag.failEmpty) }
+        if members.isEmpty { try emitEmpty("members", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for member in members {
             Shell.bashCurrent.stdout(
                 "\(member.email ?? member.id ?? "")\t\(member.role ?? "")\t\(member.type ?? "")\n")
@@ -2879,11 +2924,12 @@ struct AdminActivities: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingExhaustedAndEmpty(body) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ReportActivityList.self, from: body)
         let activities = list.items ?? []
-        if activities.isEmpty { try emitEmpty("activities", failEmpty: failEmptyFlag.failEmpty) }
+        if activities.isEmpty { try emitEmpty("activities", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for activity in activities {
             let time = activity.id?.time ?? ""
             let actor = activity.actor?.email ?? activity.actor?.profileId ?? ""

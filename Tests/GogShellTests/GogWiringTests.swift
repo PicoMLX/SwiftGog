@@ -236,6 +236,40 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == ExitStatus(3))
     }
 
+    @Test func failEmptyHonoredInJsonMode() async throws {
+        // --json --fail-empty must still exit 3 on an empty listing.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func failEmptyDoesNotFireWhenMorePages() async throws {
+        // An empty page with a nextPageToken means more may follow — don't fail.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200, body: Data(#"{"files":[],"nextPageToken":"more"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("next page token: more"))
+    }
+
     @Test func driveLsRejectsBadMax() async throws {
         // Validation happens before any network/credential use, so this needs
         // neither — exit 2 with a usage diagnostic.
