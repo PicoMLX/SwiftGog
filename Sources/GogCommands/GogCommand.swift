@@ -1139,8 +1139,9 @@ struct CalendarEvents: AsyncParsableCommand {
                 "gog: calendar events --page requires --from.\n"
                     + "Google Calendar page tokens must be used with the same "
                     + "request that produced them.\n"
-                    + "Repeat the original --from value, e.g.:\n"
-                    + "  gog calendar events --from 2026-06-03T15:00:00Z --page XYZ\n")
+                    + "Repeat the original options (the same --from, plus --max "
+                    + "if you set one), e.g.:\n"
+                    + "  gog calendar events --from 2026-06-03T15:00:00Z --max 10 --page XYZ\n")
             throw ExitCode(2)
         }
         var comps = URLComponents(string:
