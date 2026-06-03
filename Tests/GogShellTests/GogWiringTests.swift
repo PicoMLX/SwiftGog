@@ -760,6 +760,80 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stderr.contains("File not found."))
     }
 
+    @Test func httpErrorHintsApiNotEnabled() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let body = #"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Drive API has not been used in project 123 before or it is disabled. See https://console.developers.google.com/apis/api/drive.googleapis.com/overview","errors":[{"reason":"accessNotConfigured"}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 403, body: Data(body.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls")
+            }
+        }
+        #expect(run.exitStatus != .success)
+        #expect(run.stderr.contains("Drive API is not enabled"))
+        #expect(run.stderr.contains(
+            "console.developers.google.com/apis/api/drive.googleapis.com"))
+    }
+
+    @Test func httpErrorHintsInsufficientScope() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let body = #"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Request had insufficient authentication scopes.","errors":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 403, body: Data(body.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls")
+            }
+        }
+        #expect(run.exitStatus != .success)
+        #expect(run.stderr.contains("lacks the scope"))
+        #expect(run.stderr.contains("host must grant"))
+    }
+
+    @Test func httpErrorHintsRateLimit() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let body = #"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded.","errors":[{"reason":"rateLimitExceeded"}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 429, body: Data(body.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls")
+            }
+        }
+        #expect(run.exitStatus != .success)
+        #expect(run.stderr.contains("Rate limited"))
+        #expect(run.stderr.contains("backoff"))
+    }
+
+    @Test func httpErrorHintsApiHostWithTrailingPunctuation() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The API host sits at a sentence end ("…gmail.googleapis.com.") — the
+        // trailing dot must not defeat host matching.
+        let body = #"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Gmail API has not been used in project 9 before or it is disabled. Enable gmail.googleapis.com.","errors":[{"reason":"accessNotConfigured"}]}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 403, body: Data(body.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail messages")
+            }
+        }
+        #expect(run.exitStatus != .success)
+        #expect(run.stderr.contains("Gmail API is not enabled"))
+    }
+
     @Test func driveGetEscapesUnsafeId() async throws {
         // A space/slash in the id would crash a force-unwrapped URL; the
         // percent-encoding path must keep it a normal request.
