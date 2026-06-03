@@ -350,6 +350,8 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         let run = try await shell.runCapturing("gog calendar events --page TOK")
         #expect(run.exitStatus == ExitStatus(2))
         #expect(run.stderr.contains("--page requires --from"))
+        // The hint names the concrete fix: replay the original --from.
+        #expect(run.stderr.contains("Repeat the original --from"))
     }
 
     @Test func driveLsRejectsBadMax() async throws {
