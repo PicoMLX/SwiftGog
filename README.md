@@ -133,6 +133,20 @@ A blocked mutation fails closed with **exit 3** before any network call. The hos
 also controls *which* commands exist — `registerGogCommands()` installs the full
 tree, but a host may install a narrower command set instead.
 
+### Compatibility note: directory-write gating differs from `gogcli`
+
+Upstream [`gogcli`](https://github.com/steipete/gogcli) guards destructive
+directory operations (suspending a user, changing group membership) with an
+**interactive confirmation prompt** plus a `--force` flag, and in non-interactive
+use it refuses them unless `--force` is passed. SwiftGog runs **LLM-authored bash
+with no human at a terminal**, so it replaces that with a **host-bound policy**:
+directory writes are **disabled by default** (`GogPolicy.adminWriteDisabled` —
+the one gate that defaults to *off*, unlike the send gates), and there is
+intentionally **no `--force` flag** — a command-line escape hatch would let the
+model escalate past the gate. The *host*, not the model, decides whether to
+enable directory writes. The fail-closed intent matches gogcli's non-interactive
+behaviour; the control simply moves from argv to host policy.
+
 ## Exit codes
 
 | Code | Meaning                                                                   |
