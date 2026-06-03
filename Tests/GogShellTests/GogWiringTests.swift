@@ -187,6 +187,55 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stderr.contains("re-auth required"))
     }
 
+    @Test func failEmptyExitsThreeOnEmptyListing() async throws {
+        // --fail-empty: an empty listing exits 3 (gogcli's empty-results code).
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func emptyListingSucceedsWithoutFailEmpty() async throws {
+        // Default: an empty listing is success (exit 0) with a "No X" hint.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("No files"))
+    }
+
+    @Test func failEmptyAliasNonEmptyOnInlineCommand() async throws {
+        // The --non-empty alias works, and on a non-shared-helper command.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"users":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin users --non-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
     @Test func driveLsRejectsBadMax() async throws {
         // Validation happens before any network/credential use, so this needs
         // neither — exit 2 with a usage diagnostic.
