@@ -125,7 +125,7 @@ write also supports `--dry-run`, which builds and prints the request without
 calling Google.
 
 ```swift
-// Disable outbound mail/chat; leave directory writes off (the default).
+// Disable outbound mail and chat for this run.
 GogPolicy(gmailSendDisabled: true, chatSendDisabled: true)
 ```
 
@@ -165,7 +165,10 @@ SwiftBash's allow-listed fetcher), and tests bind a fake via
 `GogTransportProvider.$current` to return canned Google JSON — no real network:
 
 ```swift
-let transport = MockTransport(response: HTTPResponse(status: 200, body: json))
+// MockTransport / StubProvider are your own test doubles conforming to
+// GogTransport / GogCredentialProvider.
+let json = #"{"files":[]}"#
+let transport = MockTransport(response: HTTPResponse(status: 200, body: Data(json.utf8)))
 try await GogTransportProvider.$current.withValue(transport) {
     try await GogCredentials.$current.withValue(StubProvider()) {
         try await shell.runCapturing("gog drive ls --json")
