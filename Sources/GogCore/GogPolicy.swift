@@ -6,10 +6,18 @@ public struct GogPolicy: Sendable {
     public var gmailSendDisabled: Bool
     /// When true, `gog chat send` refuses to send (exit 3).
     public var chatSendDisabled: Bool
+    /// When true, the `gog admin` write commands (suspend/unsuspend a user,
+    /// add/remove a group member) refuse (exit 3). Unlike sending, these
+    /// directory mutations are **high-blast-radius, so they default to
+    /// disabled** — the host must opt in by setting this to false.
+    public var adminWriteDisabled: Bool
 
-    public init(gmailSendDisabled: Bool = false, chatSendDisabled: Bool = false) {
+    public init(gmailSendDisabled: Bool = false,
+                chatSendDisabled: Bool = false,
+                adminWriteDisabled: Bool = true) {
         self.gmailSendDisabled = gmailSendDisabled
         self.chatSendDisabled = chatSendDisabled
+        self.adminWriteDisabled = adminWriteDisabled
     }
 }
 

@@ -35,8 +35,11 @@ gog drive ls --max 20 --json | jq '.files[].name'
 - **Sending email is gated.** `gog gmail send` refuses to send when the host has
   disabled sending (exit 3). Use `--dry-run` to preview a message without
   sending. Only send when sending is the requested task.
+- **Directory writes are gated.** `gog admin suspend`/`unsuspend` and `gog admin
+  member-add`/`member-remove` refuse (exit 3) unless the host has enabled admin
+  writes; they are off by default because they affect the whole domain.
 - **Preview writes with `--dry-run`** where supported (`gmail send`,
-  `calendar create`) before performing the mutation.
+  `calendar create`, the `gog admin` writes) before performing the mutation.
 - **Command availability is host-controlled.** The host registers only the
   commands it allows; if a command isn't available, it wasn't enabled.
 
@@ -164,19 +167,33 @@ gog youtube playlists --json
 
 ## Admin (Directory + Reports)
 
-Read-only Admin SDK. Requires a host token with the matching admin scopes
-(Directory for users/groups, `admin.reports.audit.readonly` for `activities`)
-belonging to a Workspace admin; otherwise Google returns 403. Directory
-listings default to the admin's own customer.
+Admin SDK. Requires a host token with the matching admin scopes (Directory for
+users/groups, `admin.reports.audit.readonly` for `activities`) belonging to a
+Workspace admin; otherwise Google returns 403. Directory listings default to
+the admin's own customer.
 
 ```bash
+# Reads
 gog admin users --json                    # directory users (--domain / --query to narrow)
 gog admin user alice@example.com --json   # one user by email or id
 gog admin groups --json                   # groups (--user <email> for a user's groups)
 gog admin group eng@example.com --json    # one group
 gog admin members eng@example.com --json  # a group's members (--roles OWNER,MANAGER)
 gog admin activities login --json         # audit log (admin/drive/token/…; --user, --event)
+
+# Writes — disabled by default; the host must opt in, and --dry-run previews
+gog admin suspend alice@example.com --dry-run        # then drop --dry-run to apply
+gog admin unsuspend alice@example.com
+gog admin member-add eng@example.com bob@example.com --role MEMBER --dry-run
+gog admin member-remove eng@example.com bob@example.com
 ```
+
+These directory **writes are high-blast-radius and gated**: they refuse with
+exit 3 unless the host has enabled admin writes. Always `--dry-run` first. The
+host token also needs the **write** Directory scopes (the read-only scopes are
+not enough): `…/auth/admin.directory.user` for suspend/unsuspend, and
+`…/auth/admin.directory.group.member` (or `…/admin.directory.group`) for
+member-add/remove — otherwise Google returns 403.
 
 ## Discovery
 

@@ -37,6 +37,17 @@ public struct GoogleHTTPClient {
                           contentType: "application/json")
     }
 
+    /// Authenticated `PATCH` with a JSON body (partial update).
+    public func patch(_ url: URL, jsonBody: Data) async throws -> Data {
+        try await perform(method: "PATCH", url: url, body: jsonBody,
+                          contentType: "application/json")
+    }
+
+    /// Authenticated `DELETE`. Returns the (often empty) response body.
+    public func delete(_ url: URL) async throws -> Data {
+        try await perform(method: "DELETE", url: url, body: nil, contentType: nil)
+    }
+
     /// Shared flow: bearer token, one `401` → refresh retry, then status
     /// mapping. Returns the body, or throws an `ExitCode` (7 = no creds /
     /// re-auth required; 1 = other HTTP ≥ 400) after writing a diagnostic to
