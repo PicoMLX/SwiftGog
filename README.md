@@ -33,8 +33,8 @@ hints/progress/errors to **stderr**, composable through pipes.
 - **Sends and directory writes are gated.** `gmail send`, `chat send`, and the
   `admin` directory writes consult a host `GogPolicy` (and support `--dry-run`).
   Other write commands (e.g. `drive upload`, `calendar create`, `sheets update`,
-  `tasks add`) are **not** policy-gated — restrict those by not registering them,
-  or via the token's scopes and the network allow-list.
+  `tasks add`) are **not** policy-gated — restrict those via the token's scopes
+  and the network allow-list.
 
 See [`PLAN.md`](PLAN.md) for the full architecture and decisions, and
 [`.agents/skills/gog/SKILL.md`](.agents/skills/gog/SKILL.md) for the
@@ -92,11 +92,17 @@ struct MyProvider: GogCredentialProvider {
 let shell = Shell(fileSystem: myMountedFileSystem)   // e.g. mounts "/gog"
 shell.networkConfig = NetworkConfig(
     allowedURLPrefixes: [
+        // The full tree needs every service host it can reach; trim to match
+        // the commands you actually register/allow (see PLAN.md).
         AllowedURLEntry("https://www.googleapis.com/"),     // Drive, Calendar
-        AllowedURLEntry("https://gmail.googleapis.com/"),
+        AllowedURLEntry("https://gmail.googleapis.com/"),   // Gmail
         AllowedURLEntry("https://people.googleapis.com/"),  // identity + contacts
+        AllowedURLEntry("https://tasks.googleapis.com/"),   // Tasks
+        AllowedURLEntry("https://sheets.googleapis.com/"),  // Sheets (Docs/Slides export via www)
+        AllowedURLEntry("https://chat.googleapis.com/"),    // Chat
+        AllowedURLEntry("https://forms.googleapis.com/"),   // Forms
+        AllowedURLEntry("https://youtube.googleapis.com/"), // YouTube
         AllowedURLEntry("https://admin.googleapis.com/"),   // Admin Directory + Reports
-        // …add a host prefix per service family you enable; see PLAN.md.
     ],
     allowedMethods: [.GET, .POST, .PATCH, .PUT, .DELETE])
 
@@ -140,9 +146,10 @@ calling Google.
 GogPolicy(gmailSendDisabled: true, chatSendDisabled: true)
 ```
 
-A blocked mutation fails closed with **exit 3** before any network call. The host
-also controls *which* commands exist — `registerGogCommands()` installs the full
-tree, but a host may install a narrower command set instead.
+A blocked mutation fails closed with **exit 3** before any network call.
+`registerGogCommands()` installs the **full** command tree (selective
+installation is not part of the public API today), so the remaining levers for
+ungated writes are the token's scopes and the network allow-list.
 
 ### Compatibility note: directory-write gating differs from `gogcli`
 
