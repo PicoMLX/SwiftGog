@@ -325,6 +325,23 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.lastURL?.absoluteString.contains("nextPageToken") == true)
     }
 
+    @Test func driveSearchAcceptsPageToken() async throws {
+        // A nextPageToken surfaced by search must be feedable back via --page,
+        // so a paging script isn't stuck with a token it can't use.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        _ = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive search report --page TOK123")
+            }
+        }
+        #expect(transport.lastURL?.absoluteString.contains("pageToken=TOK123") == true)
+    }
+
     @Test func driveLsRejectsBadMax() async throws {
         // Validation happens before any network/credential use, so this needs
         // neither — exit 2 with a usage diagnostic.

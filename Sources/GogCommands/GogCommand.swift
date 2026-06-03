@@ -356,6 +356,8 @@ struct DriveSearch: AsyncParsableCommand {
     @Argument(help: "Search text.") var query: String
     @Option(name: .long, help: "Maximum number of files to return (1–1000).")
     var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
     @OptionGroup var failEmptyFlag: FailEmptyFlag
@@ -378,6 +380,7 @@ struct DriveSearch: AsyncParsableCommand {
             URLQueryItem(name: "pageSize", value: String(max)),
             URLQueryItem(name: "fields", value: "nextPageToken,files(id,name,mimeType)"),
         ]
+        if let page { comps.queryItems?.append(URLQueryItem(name: "pageToken", value: page)) }
         let body = try await GoogleHTTPClient().get(comps.url!)
         try emitDriveFileList(body, json: json, failEmpty: failEmptyFlag.failEmpty)
     }
@@ -617,6 +620,8 @@ struct GmailMessages: AsyncParsableCommand {
     var query: String?
     @Option(name: .long, help: "Maximum messages to return (1–500).")
     var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
     @OptionGroup var failEmptyFlag: FailEmptyFlag
@@ -630,6 +635,7 @@ struct GmailMessages: AsyncParsableCommand {
             string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
         var query = [URLQueryItem(name: "maxResults", value: String(max))]
         if let q = self.query { query.append(URLQueryItem(name: "q", value: q)) }
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
         comps.queryItems = query
 
         let body = try await GoogleHTTPClient().get(comps.url!)
@@ -1113,6 +1119,8 @@ struct CalendarEvents: AsyncParsableCommand {
     var max: Int = 100
     @Option(name: .long, help: "Earliest start time (RFC3339).")
     var from: String?
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
     @OptionGroup var failEmptyFlag: FailEmptyFlag
@@ -1127,12 +1135,13 @@ struct CalendarEvents: AsyncParsableCommand {
         // Default to upcoming events: orderBy=startTime needs a timeMin to mean
         // "from now" rather than from the start of the calendar.
         let timeMin = from ?? ISO8601DateFormatter().string(from: Date())
-        let query = [
+        var query = [
             URLQueryItem(name: "maxResults", value: String(max)),
             URLQueryItem(name: "singleEvents", value: "true"),
             URLQueryItem(name: "orderBy", value: "startTime"),
             URLQueryItem(name: "timeMin", value: timeMin),
         ]
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
         comps.queryItems = query
 
         let body = try await GoogleHTTPClient().get(comps.url!)
