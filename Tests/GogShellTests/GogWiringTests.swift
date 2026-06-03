@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import BashInterpreter
+import BashCommandKit   // registerStandardCommands() — imported explicitly, not via GogShell
 import GogCore
 import GogCommands
 import GogShell
@@ -1828,5 +1829,74 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         // Outside every mount: rejected by MountedFileSystem → non-zero exit.
         let denied = try await shell.runCapturing("gog version --out /etc/v.txt")
         #expect(denied.exitStatus != .success)
+    }
+
+    // MARK: - Credential confinement + end-to-end sandbox smoke
+
+    @Test func tokenNeverSurfacesInEnvironment() async throws {
+        let shell = Shell()
+        shell.registerStandardCommands()   // printenv / env live here
+        shell.registerGogCommands()
+        let secret = "secret-token-do-not-leak-1234"
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200, body: Data(#"{"names":[{"displayName":"Ada"}]}"#.utf8)))
+        // Authenticate a request, then dump the environment in the same shell/task
+        // via the very commands model-authored bash would use to fish for secrets.
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: secret, accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog me --json && printenv && env")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        // The token authenticated the call but is bound out-of-band (task-local),
+        // so it must never appear in the environment, argv, or any output.
+        #expect(!run.stdout.contains(secret))
+        #expect(!run.stderr.contains(secret))
+    }
+
+    @Test func e2eDriveListPipesThroughGrep() async throws {
+        let shell = Shell()
+        shell.registerStandardCommands()   // grep lives here
+        shell.registerGogCommands()
+        let json = #"{"files":[{"id":"f1","name":"Quarterly.pdf","mimeType":"application/pdf"}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        // gog's JSON must flow through a real pipe to another sandbox command.
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls --json | grep Quarterly")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("Quarterly.pdf"))
+    }
+
+    @Test func e2eDownloadThenReadBackThroughShell() async throws {
+        let mounted = MountedFileSystem(
+            mounts: [.init(virtual: "/gog", host: "/gog")],
+            backing: InMemoryFileSystem())
+        let shell = Shell(fileSystem: mounted)
+        shell.registerStandardCommands()   // cat lives here
+        try await shell.fileSystem.createDirectory("/gog", intermediates: true)
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data("REPORT-BODY".utf8)))
+        // Download into the mount, then read it back with `cat` (a separate sandbox
+        // command) — proving gog writes into /gog and composes end-to-end.
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog drive download FID --out /gog/report.txt && cat /gog/report.txt")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("REPORT-BODY"))
     }
 }
