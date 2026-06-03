@@ -30,9 +30,11 @@ hints/progress/errors to **stderr**, composable through pipes.
   upload targets must be sandbox paths.
 - **Network is allow-listed.** Only the Google API hosts you configure are
   reachable; with no `networkConfig`, networked commands fail closed (exit 7).
-- **Mutations are gated.** Writes that send or change things (`gmail send`,
-  `chat send`, the `admin` directory writes) honour a host `GogPolicy` and
-  support `--dry-run`.
+- **Sends and directory writes are gated.** `gmail send`, `chat send`, and the
+  `admin` directory writes consult a host `GogPolicy` (and support `--dry-run`).
+  Other write commands (e.g. `drive upload`, `calendar create`, `sheets update`,
+  `tasks add`) are **not** policy-gated — restrict those by not registering them,
+  or via the token's scopes and the network allow-list.
 
 See [`PLAN.md`](PLAN.md) for the full architecture and decisions, and
 [`.agents/skills/gog/SKILL.md`](.agents/skills/gog/SKILL.md) for the
@@ -40,15 +42,24 @@ agent-facing command reference.
 
 ## Installation
 
-Add SwiftGog (and SwiftBash) as package dependencies:
+SwiftGog depends on SwiftBash. Today the manifest pins SwiftBash as a **sibling
+checkout** (`Package.swift` declares `.package(path: "../SwiftBash")`), so clone
+both repos side by side and depend on SwiftGog by path:
+
+```sh
+git clone https://github.com/picomlx/SwiftBash.git
+git clone https://github.com/picomlx/SwiftGog.git   # sits next to ../SwiftBash
+```
 
 ```swift
-// Package.swift
+// your app's Package.swift
 dependencies: [
-    .package(url: "https://github.com/picomlx/SwiftGog.git", branch: "main"),
-    .package(url: "https://github.com/picomlx/SwiftBash.git", branch: "main"),
+    .package(path: "../SwiftGog"),
 ],
 ```
+
+(For remote/URL consumption, switch SwiftGog's own SwiftBash dependency from the
+`path:` pin to a `url:` pin first.)
 
 The package vends three libraries:
 
@@ -197,5 +208,6 @@ sandbox-deny tests, and per-command behaviour).
 
 The command surface spans identity, Drive, Gmail, Calendar, Contacts, Tasks,
 Docs, Sheets, Slides, Chat, Forms, YouTube, and Admin (Directory + Reports),
-read-first with gated writes. See `SKILL.md` for the current command list and
-`PLAN.md` for the roadmap.
+read-first with gated writes. See
+[`.agents/skills/gog/SKILL.md`](.agents/skills/gog/SKILL.md) for the current
+command list and [`PLAN.md`](PLAN.md) for the roadmap.
