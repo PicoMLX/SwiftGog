@@ -93,6 +93,11 @@ gog calendar events --from 2026-06-01T00:00:00Z --json
 gog calendar get <eventId> --json
 gog calendar create --summary 'Standup' \
   --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z --dry-run
+
+gog calendar calendars --json                 # your calendar list (id, summary, role)
+gog calendar freebusy --json                  # busy slots, next 24h on primary
+gog calendar freebusy --from <RFC3339> --to <RFC3339> \
+  --calendar primary --calendar team@example.com --json   # busy across calendars
 ```
 
 ## Contacts

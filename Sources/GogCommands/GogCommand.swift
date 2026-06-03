@@ -1034,7 +1034,10 @@ struct GogCalendar: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "calendar",
         abstract: "Google Calendar.",
-        subcommands: [CalendarEvents.self, CalendarGet.self, CalendarCreate.self],
+        subcommands: [
+            CalendarEvents.self, CalendarGet.self, CalendarCreate.self,
+            CalendarCalendars.self, CalendarFreeBusy.self,
+        ],
         aliases: ["cal"])
 }
 
@@ -1167,6 +1170,144 @@ private struct CalEvent: Decodable {
 
     /// Best-effort start label: dateTime, else all-day date, else empty.
     var when: String { start?.dateTime ?? start?.date ?? "" }
+}
+
+/// `gog calendar calendars` — the calendars on your calendar list.
+struct CalendarCalendars: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "calendars",
+        abstract: "List the calendars on your calendar list.")
+
+    @Option(name: .long, help: "Maximum calendars to return (1–250).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 250 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 250\n")
+            throw ExitCode(2)
+        }
+        var items = [URLQueryItem(name: "maxResults", value: String(max))]
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://www.googleapis.com/calendar/v3/users/me/calendarList", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(CalListResponse.self, from: body)
+        let calendars = list.items ?? []
+        if calendars.isEmpty { Shell.bashCurrent.stderr("No calendars\n") }
+        for cal in calendars {
+            let primary = (cal.primary == true) ? "\tprimary" : ""
+            Shell.bashCurrent.stdout(
+                "\(cal.id ?? "")\t\(tsvEscaped(cal.summary ?? ""))"
+                    + "\t\(cal.accessRole ?? "")\(primary)\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+/// `gog calendar freebusy` — busy intervals across one or more calendars over a
+/// time window (defaults to the next 24h on the primary calendar).
+struct CalendarFreeBusy: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "freebusy",
+        abstract: "Show busy intervals across calendars.",
+        aliases: ["fb"])
+
+    @Option(name: .long, help: "Window start (RFC3339). Defaults to now.")
+    var from: String?
+    @Option(name: .long, help: "Window end (RFC3339). Defaults to 24h after start.")
+    var to: String?
+    @Option(name: .long, help: "Calendar ID to query (repeatable; default 'primary').")
+    var calendar: [String] = []
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let now = Date()
+        let formatter = ISO8601DateFormatter()
+        let timeMin = from ?? formatter.string(from: now)
+        // Default the window end to 24h after the *start* (not now), so a future
+        // --from with no --to still yields a valid timeMin < timeMax window.
+        // --from / --to are passed through verbatim when given; we only need to
+        // parse the start to compute the default end (and validate it then).
+        let timeMax: String
+        if let to {
+            timeMax = to
+        } else {
+            let startDate: Date
+            if let from {
+                guard let parsed = formatter.date(from: from) else {
+                    Shell.bashCurrent.stderr(
+                        "gog: --from must be RFC3339, e.g. 2026-06-02T10:00:00Z\n")
+                    throw ExitCode(2)
+                }
+                startDate = parsed
+            } else {
+                startDate = now
+            }
+            timeMax = formatter.string(from: startDate.addingTimeInterval(86_400))
+        }
+        let ids = calendar.isEmpty ? ["primary"] : calendar
+
+        struct Request: Encodable {
+            struct Item: Encodable { let id: String }
+            let timeMin: String
+            let timeMax: String
+            let items: [Item]
+        }
+        let payload = try JSONEncoder().encode(Request(
+            timeMin: timeMin, timeMax: timeMax, items: ids.map { .init(id: $0) }))
+        let url = try googleURL("https://www.googleapis.com/calendar/v3/freeBusy")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let response = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
+        let calendars = response.calendars ?? [:]
+        var anyBusy = false
+        // Iterate the returned keys in a stable (sorted) order.
+        for id in calendars.keys.sorted() {
+            guard let cal = calendars[id] else { continue }
+            if let errors = cal.errors, !errors.isEmpty {
+                let reasons = errors.compactMap(\.reason).joined(separator: ",")
+                Shell.bashCurrent.stderr("gog: \(id): \(reasons)\n")
+            }
+            for slot in cal.busy ?? [] {
+                anyBusy = true
+                Shell.bashCurrent.stdout(
+                    "\(id)\t\(slot.start ?? "")\t\(slot.end ?? "")\n")
+            }
+        }
+        if !anyBusy { Shell.bashCurrent.stderr("No busy intervals\n") }
+    }
+}
+
+private struct CalListResponse: Decodable {
+    struct Entry: Decodable {
+        let id: String?
+        let summary: String?
+        let accessRole: String?
+        let primary: Bool?
+    }
+    let items: [Entry]?
+    let nextPageToken: String?
+}
+private struct FreeBusyResponse: Decodable {
+    struct Cal: Decodable {
+        struct Slot: Decodable { let start: String?; let end: String? }
+        struct Err: Decodable { let reason: String? }
+        let busy: [Slot]?
+        let errors: [Err]?
+    }
+    let calendars: [String: Cal]?
 }
 
 // MARK: - Contacts (People API connections)
