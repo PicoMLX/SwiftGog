@@ -1430,6 +1430,17 @@ struct ContactsSearch: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --max must be between 1 and 30\n")
             throw ExitCode(2)
         }
+        let client = GoogleHTTPClient()
+        // Google's searchContacts wants a warmup request with an empty query to
+        // refresh its server-side cache before the real search; without it,
+        // recently added/changed contacts can be missing. Issue it, discard.
+        let warmup = try googleURL(
+            "https://people.googleapis.com/v1/people:searchContacts",
+            query: [
+                URLQueryItem(name: "query", value: ""),
+                URLQueryItem(name: "readMask", value: "names,emailAddresses"),
+            ])
+        _ = try await client.get(warmup)
         let url = try googleURL(
             "https://people.googleapis.com/v1/people:searchContacts",
             query: [
@@ -1437,7 +1448,7 @@ struct ContactsSearch: AsyncParsableCommand {
                 URLQueryItem(name: "readMask", value: "names,emailAddresses"),
                 URLQueryItem(name: "pageSize", value: String(max)),
             ])
-        let body = try await GoogleHTTPClient().get(url)
+        let body = try await client.get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
             return
