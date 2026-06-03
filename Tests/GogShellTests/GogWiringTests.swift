@@ -342,6 +342,16 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.lastURL?.absoluteString.contains("pageToken=TOK123") == true)
     }
 
+    @Test func calendarEventsPageRequiresFrom() async throws {
+        // Paging calendar events needs an explicit --from so the next request
+        // replays the original time window (validation precedes any network use).
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog calendar events --page TOK")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--page requires --from"))
+    }
+
     @Test func driveLsRejectsBadMax() async throws {
         // Validation happens before any network/credential use, so this needs
         // neither — exit 2 with a usage diagnostic.

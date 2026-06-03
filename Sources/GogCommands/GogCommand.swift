@@ -1130,6 +1130,16 @@ struct CalendarEvents: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --max must be between 1 and 2500\n")
             throw ExitCode(2)
         }
+        // Calendar paging must replay the original request: the time window is
+        // baked into the page token. `timeMin` defaults to "now" when --from is
+        // omitted, which a later --page call can't reproduce — so require an
+        // explicit --from when paging rather than silently shifting the window.
+        if page != nil, from == nil {
+            Shell.bashCurrent.stderr(
+                "gog: calendar events --page requires --from "
+                    + "(the page token is tied to the original --from time window)\n")
+            throw ExitCode(2)
+        }
         var comps = URLComponents(string:
             "https://www.googleapis.com/calendar/v3/calendars/primary/events")!
         // Default to upcoming events: orderBy=startTime needs a timeMin to mean
