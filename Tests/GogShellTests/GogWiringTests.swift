@@ -1745,6 +1745,7 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
 
     @Test func tokenNeverSurfacesInEnvironment() async throws {
         let shell = Shell()
+        shell.registerStandardCommands()   // printenv / env live here
         shell.registerGogCommands()
         let secret = "secret-token-do-not-leak-1234"
         let transport = MockTransport(
@@ -1768,6 +1769,7 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
 
     @Test func e2eDriveListPipesThroughGrep() async throws {
         let shell = Shell()
+        shell.registerStandardCommands()   // grep lives here
         shell.registerGogCommands()
         let json = #"{"files":[{"id":"f1","name":"Quarterly.pdf","mimeType":"application/pdf"}]}"#
         let transport = MockTransport(
@@ -1789,6 +1791,7 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
             mounts: [.init(virtual: "/gog", host: "/gog")],
             backing: InMemoryFileSystem())
         let shell = Shell(fileSystem: mounted)
+        shell.registerStandardCommands()   // cat lives here
         try await shell.fileSystem.createDirectory("/gog", intermediates: true)
         shell.registerGogCommands()
         let transport = MockTransport(
