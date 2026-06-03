@@ -52,6 +52,7 @@ let package = Package(
             dependencies: [
                 "GogShell", "GogCore", "GogCommands",
                 .product(name: "BashInterpreter", package: "SwiftBash"),
+                .product(name: "BashCommandKit", package: "SwiftBash"),
             ]),
     ]
 )

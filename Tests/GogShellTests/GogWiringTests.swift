@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import BashInterpreter
+import BashCommandKit   // registerStandardCommands() — imported explicitly, not via GogShell
 import GogCore
 import GogCommands
 import GogShell
