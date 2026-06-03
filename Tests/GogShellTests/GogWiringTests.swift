@@ -28,11 +28,13 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
     let response: HTTPResponse
     var lastURL: URL?
     var lastBody: Data?
+    var urls: [URL] = []
     init(response: HTTPResponse) { self.response = response }
     func send(method: String, url: URL,
               headers: [String: String], body: Data?) async throws -> HTTPResponse {
         lastURL = url
         lastBody = body
+        urls.append(url)
         return response
     }
 }
@@ -893,6 +895,84 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         }
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("Ada <ada@x.com>"))
+    }
+
+    @Test func contactsSearchRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"results":[{"person":{"resourceName":"people/c1","names":[{"displayName":"Ada"}],"emailAddresses":[{"value":"ada@x.com"}]}}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts search ada")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("people/c1\tAda\tada@x.com"))
+    }
+
+    @Test func contactsSearchHitsSearchEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"results":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts search ada")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("searchContacts"))
+        #expect(url.contains("query=ada"))
+    }
+
+    @Test func contactsSearchSendsWarmupFirst() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"results":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts search ada")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        // searchContacts requires an empty-query warmup before the real search.
+        #expect(transport.urls.count == 2)
+        #expect(transport.urls.first?.absoluteString.contains("query=ada") == false)
+        #expect(transport.urls.last?.absoluteString.contains("query=ada") == true)
+    }
+
+    @Test func contactsSearchRejectsBadMax() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog contacts search ada --max 31")
+        #expect(run.exitStatus == ExitStatus(2))
+    }
+
+    @Test func contactsOtherRenders() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"otherContacts":[{"resourceName":"otherContacts/o1","names":[{"displayName":"Bob"}],"emailAddresses":[{"value":"bob@x.com"}]}]}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts other")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("otherContacts/o1\tBob\tbob@x.com"))
     }
 
     @Test func tasksListsRenders() async throws {

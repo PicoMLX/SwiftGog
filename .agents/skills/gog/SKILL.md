@@ -105,6 +105,8 @@ gog calendar freebusy --from <RFC3339> --to <RFC3339> \
 ```bash
 gog contacts list --max 20 --json
 gog contacts get people/c123 --json
+gog contacts search 'jane' --json        # resolve a name → email (People searchContacts)
+gog contacts other --json                 # auto-saved "other contacts"
 ```
 
 ## Tasks

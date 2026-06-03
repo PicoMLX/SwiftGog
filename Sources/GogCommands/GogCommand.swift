@@ -1317,7 +1317,10 @@ struct GogContacts: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "contacts",
         abstract: "Google Contacts.",
-        subcommands: [ContactsList.self, ContactsGet.self],
+        subcommands: [
+            ContactsList.self, ContactsGet.self,
+            ContactsSearch.self, ContactsOther.self,
+        ],
         aliases: ["contact"])
 }
 
@@ -1406,6 +1409,113 @@ private struct Contact: Decodable {
     let resourceName: String?
     let names: [Name]?
     let emailAddresses: [Email]?
+}
+
+/// `gog contacts search <query>` — search your contacts (People searchContacts).
+struct ContactsSearch: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "search",
+        abstract: "Search your contacts by name, email, etc.",
+        aliases: ["find"])
+
+    @Argument(help: "Search text (matches names, emails, phone numbers, …).")
+    var query: String
+    @Option(name: .long, help: "Maximum results to return (1–30).") var max: Int = 10
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        // searchContacts caps pageSize at 30 and does not use page tokens.
+        guard max > 0, max <= 30 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 30\n")
+            throw ExitCode(2)
+        }
+        let client = GoogleHTTPClient()
+        // Google's searchContacts wants a warmup request with an empty query to
+        // refresh its server-side cache before the real search; without it,
+        // recently added/changed contacts can be missing. Issue it, discard.
+        let warmup = try googleURL(
+            "https://people.googleapis.com/v1/people:searchContacts",
+            query: [
+                URLQueryItem(name: "query", value: ""),
+                URLQueryItem(name: "readMask", value: "names,emailAddresses"),
+            ])
+        _ = try await client.get(warmup)
+        let url = try googleURL(
+            "https://people.googleapis.com/v1/people:searchContacts",
+            query: [
+                URLQueryItem(name: "query", value: query),
+                URLQueryItem(name: "readMask", value: "names,emailAddresses"),
+                URLQueryItem(name: "pageSize", value: String(max)),
+            ])
+        let body = try await client.get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let response = try JSONDecoder().decode(ContactSearchResults.self, from: body)
+        let results = response.results ?? []
+        if results.isEmpty { Shell.bashCurrent.stderr("No matches\n") }
+        for person in results.compactMap(\.person) {
+            let name = person.names?.first?.displayName ?? ""
+            let email = person.emailAddresses?.first?.value ?? ""
+            Shell.bashCurrent.stdout(
+                "\(person.resourceName ?? "")\t\(tsvEscaped(name))\t\(email)\n")
+        }
+    }
+}
+
+/// `gog contacts other` — auto-saved "other contacts" (people you've corresponded
+/// with who aren't in My Contacts).
+struct ContactsOther: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "other",
+        abstract: "List auto-saved 'other contacts'.")
+
+    @Option(name: .long, help: "Maximum contacts to return (1–1000).") var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.") var page: String?
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard max > 0, max <= 1000 else {
+            Shell.bashCurrent.stderr("gog: --max must be between 1 and 1000\n")
+            throw ExitCode(2)
+        }
+        var items = [
+            URLQueryItem(name: "readMask", value: "names,emailAddresses"),
+            URLQueryItem(name: "pageSize", value: String(max)),
+        ]
+        if let page { items.append(URLQueryItem(name: "pageToken", value: page)) }
+        let url = try googleURL(
+            "https://people.googleapis.com/v1/otherContacts", query: items)
+        let body = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            return
+        }
+        let list = try JSONDecoder().decode(OtherContactList.self, from: body)
+        let people = list.otherContacts ?? []
+        if people.isEmpty { Shell.bashCurrent.stderr("No other contacts\n") }
+        for person in people {
+            let name = person.names?.first?.displayName ?? ""
+            let email = person.emailAddresses?.first?.value ?? ""
+            Shell.bashCurrent.stdout(
+                "\(person.resourceName ?? "")\t\(tsvEscaped(name))\t\(email)\n")
+        }
+        if let next = list.nextPageToken {
+            Shell.bashCurrent.stderr("next page token: \(next)\n")
+        }
+    }
+}
+
+private struct ContactSearchResults: Decodable {
+    struct Result: Decodable { let person: Contact? }
+    let results: [Result]?
+}
+private struct OtherContactList: Decodable {
+    let otherContacts: [Contact]?
+    let nextPageToken: String?
 }
 
 // MARK: - Tasks
