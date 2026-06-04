@@ -795,6 +795,52 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("e1\t2026-06-02T10:00:00Z\tStandup"))
     }
 
+    @Test func calendarEventsTokenEchoesReplayCommand() async throws {
+        // A surfaced page token must be spendable: the hint echoes a ready-to-run
+        // next-page command carrying the exact --from (the window the token is
+        // tied to), --max, and token, so the follow-up replays the same request.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"e1","summary":"Standup","#
+            + #""start":{"dateTime":"2026-06-02T10:00:00Z"}}],"nextPageToken":"NPT"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar events --from 2026-06-02T00:00:00Z --max 5")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("next page token: NPT"))
+        #expect(run.stderr.contains(
+            "next page: gog calendar events --from 2026-06-02T00:00:00Z --max 5 --page NPT"))
+    }
+
+    @Test func calendarEventsTokenEchoesGeneratedFromWhenDefaulted() async throws {
+        // Without --from the request uses a generated timeMin the caller never
+        // typed; the token is unusable unless the hint echoes that value. The
+        // echoed command must therefore carry a concrete --from and the token.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"e1","summary":"x","#
+            + #""start":{"dateTime":"2026-06-02T10:00:00Z"}}],"nextPageToken":"NPT"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar events")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("next page: gog calendar events --from "))
+        #expect(run.stderr.contains("--page NPT"))
+    }
+
     @Test func calendarCreateDryRunDoesNotCreate() async throws {
         let shell = Shell()
         shell.registerGogCommands()

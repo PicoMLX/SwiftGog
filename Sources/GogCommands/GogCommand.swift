@@ -1136,11 +1136,12 @@ struct CalendarEvents: AsyncParsableCommand {
         // explicit --from when paging rather than silently shifting the window.
         if page != nil, from == nil {
             Shell.bashCurrent.stderr(
-                "gog: calendar events --page requires --from.\n"
-                    + "Google Calendar page tokens must be used with the same "
-                    + "request that produced them.\n"
-                    + "Repeat the original options (the same --from, plus --max "
-                    + "if you set one), e.g.:\n"
+                "gog: calendar events --page requires --from "
+                    + "(the token is tied to the original time window).\n"
+                    + "The previous listing printed a ready-to-run command after "
+                    + "\"next page:\" — use that.\n"
+                    + "Repeat the original options if you no longer have it "
+                    + "(same --from, plus --max if you set one), e.g.:\n"
                     + "  gog calendar events --from 2026-06-03T15:00:00Z --max 10 --page XYZ\n")
             throw ExitCode(2)
         }
@@ -1172,7 +1173,14 @@ struct CalendarEvents: AsyncParsableCommand {
                 "\(event.id ?? "")\t\(event.when)\t\(event.summary ?? "")\n")
         }
         if let next = list.nextPageToken {
-            Shell.bashCurrent.stderr("next page token: \(next)\n")
+            // Make the token spendable. A first page run without --from used a
+            // generated timeMin the caller never saw; the next request must
+            // replay it exactly (--page requires --from). Echo a ready-to-run
+            // command carrying the effective --from and --max next to the token.
+            Shell.bashCurrent.stderr(
+                "next page token: \(next)\n"
+                    + "next page: gog calendar events"
+                    + " --from \(timeMin) --max \(max) --page \(next)\n")
         }
     }
 }
