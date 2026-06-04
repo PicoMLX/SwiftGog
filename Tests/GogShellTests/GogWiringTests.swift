@@ -841,6 +841,28 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stderr.contains("--page NPT"))
     }
 
+    @Test func calendarEventsJsonModeEchoesNextPage() async throws {
+        // --json returns early; the token in the raw response is still un-spendable
+        // (Google omits the generated timeMin), so the replay hint must fire here
+        // too — on stderr, leaving stdout pure JSON.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"e1"}],"nextPageToken":"NPT"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar events --json")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("nextPageToken"))
+        #expect(run.stderr.contains("next page: gog calendar events --from "))
+        #expect(run.stderr.contains("--page NPT"))
+    }
+
     @Test func calendarCreateDryRunDoesNotCreate() async throws {
         let shell = Shell()
         shell.registerGogCommands()
@@ -954,6 +976,46 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         let sent = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(sent.contains(#""timeMin":"2030-01-01T00:00:00Z""#))
         #expect(sent.contains(#""timeMax":"2030-01-02T00:00:00Z""#))
+    }
+
+    @Test func calendarFreeBusyErrorsExitNonZeroNotEmpty() async throws {
+        // A calendar that reports errors[] failed to compute — it must not read
+        // as "free". With no busy slots it would otherwise hit the empty path;
+        // instead it exits non-zero (reason on stderr), even without --fail-empty.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"calendars":{"bad@x.com":{"errors":[{"reason":"notFound"}]}}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar freebusy --calendar bad@x.com")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+        #expect(run.stderr.contains("bad@x.com: notFound"))
+    }
+
+    @Test func calendarFreeBusyJsonErrorsExitNonZeroNotEmpty() async throws {
+        // Same contract in --json --fail-empty mode: errors[] must surface as a
+        // non-zero exit, not the empty/exit-3 "no conflicts" signal.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"calendars":{"bad@x.com":{"errors":[{"reason":"notFound"}]}}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar freebusy --calendar bad@x.com --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+        #expect(run.stdout.contains("notFound"))
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {

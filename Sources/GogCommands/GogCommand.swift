@@ -1162,6 +1162,11 @@ struct CalendarEvents: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(comps.url!)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            // The raw JSON omits the generated timeMin, so a token in it is just
+            // as un-spendable as in human mode — echo the replay command too.
+            emitNextPageHint(
+                (try? JSONDecoder().decode(CalEventList.self, from: body))?.nextPageToken,
+                timeMin: timeMin)
             if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \CalEventList.items, token: \CalEventList.nextPageToken) { throw ExitCode(3) }
             return
         }
@@ -1172,16 +1177,20 @@ struct CalendarEvents: AsyncParsableCommand {
             Shell.bashCurrent.stdout(
                 "\(event.id ?? "")\t\(event.when)\t\(event.summary ?? "")\n")
         }
-        if let next = list.nextPageToken {
-            // Make the token spendable. A first page run without --from used a
-            // generated timeMin the caller never saw; the next request must
-            // replay it exactly (--page requires --from). Echo a ready-to-run
-            // command carrying the effective --from and --max next to the token.
-            Shell.bashCurrent.stderr(
-                "next page token: \(next)\n"
-                    + "next page: gog calendar events"
-                    + " --from \(timeMin) --max \(max) --page \(next)\n")
-        }
+        emitNextPageHint(list.nextPageToken, timeMin: timeMin)
+    }
+
+    /// Echo a ready-to-run next-page command so a surfaced token is spendable in
+    /// either mode. `--page` requires `--from`, and a default run's generated
+    /// `timeMin` is in neither the JSON response nor the human output — so print
+    /// the effective --from/--max next to the token. stderr keeps --json stdout
+    /// pure.
+    private func emitNextPageHint(_ token: String?, timeMin: String) {
+        guard let token else { return }
+        Shell.bashCurrent.stderr(
+            "next page token: \(token)\n"
+                + "next page: gog calendar events"
+                + " --from \(timeMin) --max \(max) --page \(token)\n")
     }
 }
 
@@ -1365,21 +1374,29 @@ struct CalendarFreeBusy: AsyncParsableCommand {
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
-            if failEmptyFlag.failEmpty {
-                let decoded = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
-                let anyBusy = (decoded.calendars ?? [:]).values
-                    .contains { !($0.busy ?? []).isEmpty }
-                if !anyBusy { throw ExitCode(3) }
+            let cals = try JSONDecoder()
+                .decode(FreeBusyResponse.self, from: result).calendars ?? [:]
+            // A calendar that returned errors[] failed to compute — it is not
+            // "free". Surface that as a non-zero exit so --fail-empty's exit 3
+            // ("no conflicts") can't mask an unreadable/not-found calendar.
+            if cals.values.contains(where: { !($0.errors ?? []).isEmpty }) {
+                throw ExitCode(1)
+            }
+            if failEmptyFlag.failEmpty,
+                !cals.values.contains(where: { !($0.busy ?? []).isEmpty }) {
+                throw ExitCode(3)
             }
             return
         }
         let response = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
         let calendars = response.calendars ?? [:]
         var anyBusy = false
+        var anyErrors = false
         // Iterate the returned keys in a stable (sorted) order.
         for id in calendars.keys.sorted() {
             guard let cal = calendars[id] else { continue }
             if let errors = cal.errors, !errors.isEmpty {
+                anyErrors = true
                 let reasons = errors.compactMap(\.reason).joined(separator: ",")
                 Shell.bashCurrent.stderr("gog: \(id): \(reasons)\n")
             }
@@ -1389,6 +1406,10 @@ struct CalendarFreeBusy: AsyncParsableCommand {
                     "\(id)\t\(slot.start ?? "")\t\(slot.end ?? "")\n")
             }
         }
+        // A calendar that returned errors[] failed to compute — it is not "free".
+        // Exit non-zero (reasons already on stderr) rather than letting an empty
+        // or --fail-empty result read as "no conflicts".
+        if anyErrors { throw ExitCode(1) }
         if !anyBusy { try emitEmpty("busy intervals", failEmpty: failEmptyFlag.failEmpty) }
     }
 }
