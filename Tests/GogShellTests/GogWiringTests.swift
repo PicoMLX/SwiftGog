@@ -1018,6 +1018,45 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("notFound"))
     }
 
+    @Test func calendarFreeBusyGroupErrorsExitNonZeroNotEmpty() async throws {
+        // A queried Google Group whose expansion fails appears only under
+        // groups.<id>.errors[] (no calendars entry). That's a failed lookup, so
+        // --json --fail-empty must exit non-zero, not exit 3 ("no conflicts").
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"groups":{"team@x.com":{"errors":[{"reason":"notFound"}]}},"calendars":{}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar freebusy --calendar team@x.com --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+    }
+
+    @Test func calendarFreeBusyGroupErrorsHumanModeExitNonZero() async throws {
+        // Same in human mode: the group's failure reason is surfaced on stderr
+        // and the command exits non-zero instead of the empty path.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"groups":{"team@x.com":{"errors":[{"reason":"notFound"}]}},"calendars":{}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar freebusy --calendar team@x.com")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+        #expect(run.stderr.contains("team@x.com: notFound"))
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()

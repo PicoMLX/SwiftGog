@@ -1374,14 +1374,14 @@ struct CalendarFreeBusy: AsyncParsableCommand {
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
-            let cals = try JSONDecoder()
-                .decode(FreeBusyResponse.self, from: result).calendars ?? [:]
-            // A calendar that returned errors[] failed to compute — it is not
-            // "free". Surface that as a non-zero exit so --fail-empty's exit 3
-            // ("no conflicts") can't mask an unreadable/not-found calendar.
-            if cals.values.contains(where: { !($0.errors ?? []).isEmpty }) {
-                throw ExitCode(1)
-            }
+            let decoded = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
+            let cals = decoded.calendars ?? [:]
+            // A calendar or group that returned errors[] failed to compute — it
+            // is not "free". Surface that as a non-zero exit so --fail-empty's
+            // exit 3 ("no conflicts") can't mask an unreadable/not-found target.
+            let anyErrors = cals.values.contains { !($0.errors ?? []).isEmpty }
+                || (decoded.groups ?? [:]).values.contains { !($0.errors ?? []).isEmpty }
+            if anyErrors { throw ExitCode(1) }
             if failEmptyFlag.failEmpty,
                 !cals.values.contains(where: { !($0.busy ?? []).isEmpty }) {
                 throw ExitCode(3)
@@ -1392,6 +1392,14 @@ struct CalendarFreeBusy: AsyncParsableCommand {
         let calendars = response.calendars ?? [:]
         var anyBusy = false
         var anyErrors = false
+        // Group-expansion failures (groups.<id>.errors[]) are lookup failures too,
+        // and a failed group contributes no `calendars` entry — check it first.
+        for id in (response.groups ?? [:]).keys.sorted() {
+            guard let errors = response.groups?[id]?.errors, !errors.isEmpty else { continue }
+            anyErrors = true
+            let reasons = errors.compactMap(\.reason).joined(separator: ",")
+            Shell.bashCurrent.stderr("gog: \(id): \(reasons)\n")
+        }
         // Iterate the returned keys in a stable (sorted) order.
         for id in calendars.keys.sorted() {
             guard let cal = calendars[id] else { continue }
@@ -1406,9 +1414,9 @@ struct CalendarFreeBusy: AsyncParsableCommand {
                     "\(id)\t\(slot.start ?? "")\t\(slot.end ?? "")\n")
             }
         }
-        // A calendar that returned errors[] failed to compute — it is not "free".
-        // Exit non-zero (reasons already on stderr) rather than letting an empty
-        // or --fail-empty result read as "no conflicts".
+        // A calendar or group that returned errors[] failed to compute — it is
+        // not "free". Exit non-zero (reasons already on stderr) rather than
+        // letting an empty or --fail-empty result read as "no conflicts".
         if anyErrors { throw ExitCode(1) }
         if !anyBusy { try emitEmpty("busy intervals", failEmpty: failEmptyFlag.failEmpty) }
     }
@@ -1425,13 +1433,17 @@ private struct CalListResponse: Decodable {
     let nextPageToken: String?
 }
 private struct FreeBusyResponse: Decodable {
+    struct Err: Decodable { let reason: String? }
     struct Cal: Decodable {
         struct Slot: Decodable { let start: String?; let end: String? }
-        struct Err: Decodable { let reason: String? }
         let busy: [Slot]?
         let errors: [Err]?
     }
+    // A queried Google Group is reported under `groups`; errors[] there means
+    // expansion failed (and the group contributes no `calendars` entry).
+    struct Group: Decodable { let errors: [Err]? }
     let calendars: [String: Cal]?
+    let groups: [String: Group]?
 }
 
 // MARK: - Contacts (People API connections)
