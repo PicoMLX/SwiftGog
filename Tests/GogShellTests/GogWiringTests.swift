@@ -29,12 +29,14 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
     let response: HTTPResponse
     var lastURL: URL?
     var lastBody: Data?
+    var lastMethod: String?
     var urls: [URL] = []
     init(response: HTTPResponse) { self.response = response }
     func send(method: String, url: URL,
               headers: [String: String], body: Data?) async throws -> HTTPResponse {
         lastURL = url
         lastBody = body
+        lastMethod = method
         urls.append(url)
         return response
     }
@@ -1055,6 +1057,125 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         }
         #expect(run.exitStatus == ExitStatus(1))
         #expect(run.stderr.contains("team@x.com: notFound"))
+    }
+
+    // MARK: - Writes: Calendar update / delete
+
+    @Test func calendarUpdateRequiresAField() async throws {
+        // PATCH with nothing to change is a no-op mistake — reject pre-network.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog calendar update E1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("at least one of"))
+    }
+
+    @Test func calendarUpdateDryRunDoesNotWrite() async throws {
+        // Validation + payload build precede any network, so no transport needed.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog calendar update E1 --summary Renamed --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not updating"))
+        #expect(run.stdout.contains("Renamed"))
+    }
+
+    @Test func calendarUpdatePatchesAndEmitsId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"E1","summary":"Renamed"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar update E1 --summary Renamed")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("updated: E1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/events/E1") == true)
+    }
+
+    @Test func calendarDeleteDryRunDoesNotDelete() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog calendar delete E1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not deleting"))
+        #expect(run.stdout.contains("would delete: E1"))
+    }
+
+    @Test func calendarDeleteSendsDeleteAndConfirms() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 204, body: Data()))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar delete E1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("deleted: E1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/events/E1") == true)
+    }
+
+    // MARK: - Writes: Tasks complete / delete
+
+    @Test func tasksCompleteDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog tasks complete T1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not completing"))
+        #expect(run.stdout.contains("would complete: T1"))
+    }
+
+    @Test func tasksCompletePatchesStatusAndEmitsId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"T1","status":"completed"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks complete T1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("completed: T1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(transport.lastURL?.absoluteString.contains("/@default/tasks/T1") == true)
+        // The PATCH body flips status to completed.
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("completed"))
+    }
+
+    @Test func tasksDeleteSendsDeleteToListPath() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 204, body: Data()))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks delete T1 --list L9")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("deleted: T1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.contains("/lists/L9/tasks/T1") == true)
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {

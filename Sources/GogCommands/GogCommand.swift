@@ -1103,6 +1103,7 @@ struct GogCalendar: AsyncParsableCommand {
         abstract: "Google Calendar.",
         subcommands: [
             CalendarEvents.self, CalendarGet.self, CalendarCreate.self,
+            CalendarUpdate.self, CalendarDelete.self,
             CalendarCalendars.self, CalendarFreeBusy.self,
         ],
         aliases: ["cal"])
@@ -1256,6 +1257,81 @@ struct CalendarCreate: AsyncParsableCommand {
         }
         let event = try JSONDecoder().decode(CalEvent.self, from: result)
         Shell.bashCurrent.stdout("created: \(event.id ?? "")\n")
+    }
+}
+
+/// `gog calendar update <eventId>` — patch summary/start/end on an event.
+struct CalendarUpdate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Update fields on a calendar event (--dry-run to preview).")
+
+    @Argument(help: "Event ID.") var id: String
+    @Option(name: .long, help: "New event title.") var summary: String?
+    @Option(name: .long, help: "New start time (RFC3339).") var start: String?
+    @Option(name: .long, help: "New end time (RFC3339).") var end: String?
+    @Flag(name: .long, help: "Build the request but do not update the event.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        struct EventPatch: Encodable {
+            struct When: Encodable { let dateTime: String }
+            let summary: String?
+            let start: When?
+            let end: When?
+        }
+        // PATCH is a merge — only the provided fields are sent. Require at least
+        // one so an empty update can't silently no-op.
+        guard summary != nil || start != nil || end != nil else {
+            Shell.bashCurrent.stderr(
+                "gog: calendar update needs at least one of "
+                    + "--summary, --start, --end\n")
+            throw ExitCode(2)
+        }
+        let payload = try JSONEncoder().encode(EventPatch(
+            summary: summary,
+            start: start.map { EventPatch.When(dateTime: $0) },
+            end: end.map { EventPatch.When(dateTime: $0) }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not updating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events", id: id)
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let event = try JSONDecoder().decode(CalEvent.self, from: result)
+        Shell.bashCurrent.stdout("updated: \(event.id ?? id)\n")
+    }
+}
+
+/// `gog calendar delete <eventId>` — remove an event from the primary calendar.
+struct CalendarDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete a calendar event (--dry-run to preview).",
+        aliases: ["rm"])
+
+    @Argument(help: "Event ID.") var id: String
+    @Flag(name: .long, help: "Show what would be deleted without deleting.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete: \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events", id: id)
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("deleted: \(id)\n")
     }
 }
 
@@ -1667,7 +1743,10 @@ struct GogTasks: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tasks",
         abstract: "Google Tasks.",
-        subcommands: [TasksLists.self, TasksList.self, TasksAdd.self],
+        subcommands: [
+            TasksLists.self, TasksList.self, TasksAdd.self,
+            TasksComplete.self, TasksDelete.self,
+        ],
         aliases: ["task"])
 }
 
@@ -1779,6 +1858,69 @@ struct TasksAdd: AsyncParsableCommand {
         }
         let task = try JSONDecoder().decode(TaskItem.self, from: result)
         Shell.bashCurrent.stdout("added: \(task.id ?? "")\n")
+    }
+}
+
+/// `gog tasks complete <taskId>` — mark a task completed.
+struct TasksComplete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "complete",
+        abstract: "Mark a task completed (--dry-run to preview).",
+        aliases: ["done"])
+
+    @Argument(help: "Task ID.") var task: String
+    @Option(name: .long, help: "Task list ID (default: @default).")
+    var list: String = "@default"
+    @Flag(name: .long, help: "Show what would change without writing.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        // Setting status=completed; Google fills in the `completed` timestamp.
+        let payload = try JSONEncoder().encode(["status": "completed"])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not completing\n")
+            Shell.bashCurrent.stdout("would complete: \(task)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://tasks.googleapis.com/tasks/v1/lists",
+            id: "\(list)/tasks/\(task)")
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let item = try JSONDecoder().decode(TaskItem.self, from: result)
+        Shell.bashCurrent.stdout("completed: \(item.id ?? task)\n")
+    }
+}
+
+/// `gog tasks delete <taskId>` — remove a task from a list.
+struct TasksDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete a task (--dry-run to preview).",
+        aliases: ["rm"])
+
+    @Argument(help: "Task ID.") var task: String
+    @Option(name: .long, help: "Task list ID (default: @default).")
+    var list: String = "@default"
+    @Flag(name: .long, help: "Show what would be deleted without deleting.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete: \(task)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://tasks.googleapis.com/tasks/v1/lists",
+            id: "\(list)/tasks/\(task)")
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("deleted: \(task)\n")
     }
 }
 
