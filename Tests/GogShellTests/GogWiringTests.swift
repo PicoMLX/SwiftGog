@@ -1519,6 +1519,77 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1/permissions/P1") == true)
     }
 
+    // MARK: - Writes: Sheets append / clear
+
+    @Test func sheetsAppendDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets append S1 'Sheet1!A1' --values-json '[[\"x\",\"y\"]]' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not appending"))
+        #expect(run.stdout.contains("\"x\"") && run.stdout.contains("\"y\""))
+    }
+
+    @Test func sheetsAppendRejectsBadJson() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets append S1 'Sheet1!A1' --values-json notjson")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("JSON array of rows"))
+    }
+
+    @Test func sheetsAppendPostsToAppendEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"updates":{"updatedRange":"Sheet1!A2:B2","updatedCells":2}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog sheets append S1 'Sheet1!A1' --values-json '[[\"x\",\"y\"]]'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("appended: Sheet1!A2:B2"))
+        #expect(transport.lastMethod == "POST")
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains(":append"))
+        #expect(url.contains("valueInputOption=USER_ENTERED"))
+    }
+
+    @Test func sheetsClearDryRunDoesNotClear() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog sheets clear S1 'Sheet1!A1:D9' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not clearing"))
+        #expect(run.stdout.contains("would clear: Sheet1!A1:D9"))
+    }
+
+    @Test func sheetsClearPostsToClearEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"clearedRange":"Sheet1!A1:D9"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets clear S1 'Sheet1!A1:D9'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("cleared: Sheet1!A1:D9"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains(":clear") == true)
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()

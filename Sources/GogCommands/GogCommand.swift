@@ -2409,7 +2409,9 @@ struct GogSheets: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sheets",
         abstract: "Google Sheets.",
-        subcommands: [SheetsGet.self, SheetsUpdate.self],
+        subcommands: [
+            SheetsGet.self, SheetsUpdate.self, SheetsAppend.self, SheetsClear.self,
+        ],
         aliases: ["sheet"])
 }
 
@@ -2552,6 +2554,95 @@ struct SheetsUpdate: AsyncParsableCommand {
         Shell.bashCurrent.stdout("updated \(updated.updatedCells ?? 0) cells\n")
     }
 }
+
+/// `gog sheets append <id> <range> --values-json …` — append rows after the
+/// table that overlaps the range (Sheets `values.append`).
+struct SheetsAppend: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "append",
+        abstract: "Append rows after a range's table (--dry-run to preview).")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range locating the table, e.g. Sheet1!A1.") var range: String
+    @Option(name: .long, help: #"Values as JSON rows, e.g. '[["a","b"],["c"]]'."#)
+    var valuesJson: String
+    @Flag(name: .long, help: "Build the request but do not append.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard let valuesData = valuesJson.data(using: .utf8),
+              let values = try? JSONDecoder().decode([[CellValue]].self, from: valuesData)
+        else {
+            Shell.bashCurrent.stderr(
+                #"gog: --values-json must be a JSON array of rows, e.g. '[["a","b"]]'"#
+                    + "\n")
+            throw ExitCode(2)
+        }
+        struct AppendBody: Encodable { let values: [[CellValue]] }
+        let payload = try JSONEncoder().encode(AppendBody(values: values))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not appending\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        // values.append is a custom method: the ":append" suffix sits after the
+        // (percent-encoded) range in the path. USER_ENTERED matches `update`.
+        let url = try googleURL(
+            "https://sheets.googleapis.com/v4/spreadsheets/\(pathSegment(spreadsheetId))"
+                + "/values/\(pathSegment(range)):append",
+            query: [
+                URLQueryItem(name: "valueInputOption", value: "USER_ENTERED"),
+                URLQueryItem(name: "insertDataOption", value: "INSERT_ROWS"),
+            ])
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let res = try JSONDecoder().decode(AppendResult.self, from: result)
+        Shell.bashCurrent.stdout("appended: \(res.updates?.updatedRange ?? range)\n")
+    }
+}
+
+/// `gog sheets clear <id> <range>` — clear a range's values (keeps formatting).
+struct SheetsClear: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear",
+        abstract: "Clear values from an A1 range (--dry-run to preview).")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range, e.g. Sheet1!A1:D20.") var range: String
+    @Flag(name: .long, help: "Show what would be cleared without clearing.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not clearing\n")
+            Shell.bashCurrent.stdout("would clear: \(range)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://sheets.googleapis.com/v4/spreadsheets/\(pathSegment(spreadsheetId))"
+                + "/values/\(pathSegment(range)):clear")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: Data("{}".utf8))
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let res = try JSONDecoder().decode(ClearResult.self, from: result)
+        Shell.bashCurrent.stdout("cleared: \(res.clearedRange ?? range)\n")
+    }
+}
+
+private struct AppendResult: Decodable {
+    struct Updates: Decodable { let updatedRange: String?; let updatedCells: Int? }
+    let updates: Updates?
+}
+private struct ClearResult: Decodable { let clearedRange: String? }
 
 /// A spreadsheet cell value — string, number, bool, or empty — so mixed-type
 /// ranges decode and round-trip through `--values-json` cleanly.
