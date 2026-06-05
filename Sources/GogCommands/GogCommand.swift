@@ -1428,7 +1428,7 @@ struct GmailTrash: AsyncParsableCommand {
         let url = try googleURL(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             id: "\(id)/trash")
-        _ = try await GoogleHTTPClient().post(url, jsonBody: Data())
+        _ = try await GoogleHTTPClient().post(url, jsonBody: Data("{}".utf8))
         Shell.bashCurrent.stdout("trashed: \(id)\n")
     }
 }
@@ -1452,7 +1452,7 @@ struct GmailUntrash: AsyncParsableCommand {
         let url = try googleURL(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             id: "\(id)/untrash")
-        _ = try await GoogleHTTPClient().post(url, jsonBody: Data())
+        _ = try await GoogleHTTPClient().post(url, jsonBody: Data("{}".utf8))
         Shell.bashCurrent.stdout("untrashed: \(id)\n")
     }
 }
