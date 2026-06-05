@@ -1373,6 +1373,152 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(body.contains("P1"))
     }
 
+    // MARK: - Writes: Drive cp / mv / share / unshare
+
+    @Test func driveCopyDryRunDoesNotCopy() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive cp F1 --name Clone.txt --parent P1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not copying"))
+        #expect(run.stdout.contains("Clone.txt") && run.stdout.contains("P1"))
+    }
+
+    @Test func driveCopyPostsToCopyEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"F2","name":"Clone.txt"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive cp F1 --name Clone.txt")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("copied: F2"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1/copy") == true)
+    }
+
+    @Test func driveMovePatchesParentsWithExplicitFrom() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"F1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mv F1 --to NEW --from OLD")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("moved: F1 -> NEW"))
+        #expect(transport.lastMethod == "PATCH")
+        // Single call: no parent lookup when --from is given.
+        #expect(transport.urls.count == 1)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("addParents=NEW") && url.contains("removeParents=OLD"))
+    }
+
+    @Test func driveMoveLooksUpParentsWhenFromOmitted() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // First call (GET fields=parents) and the PATCH both see this response;
+        // the GET decode yields the old parent to remove.
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"parents":["OLD"]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mv F1 --to NEW")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.urls.count == 2)            // lookup, then move
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("addParents=NEW") && url.contains("removeParents=OLD"))
+    }
+
+    @Test func driveShareRequiresEmailOrAnyone() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive share F1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("exactly one"))
+    }
+
+    @Test func driveShareRejectsBadRole() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive share F1 --email a@b.com --role admin")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("reader, writer, or commenter"))
+    }
+
+    @Test func driveSharePostsUserPermission() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog drive share F1 --email a@b.com --role writer")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("shared: PERM1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1/permissions") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("\"type\":\"user\""))
+        #expect(body.contains("writer") && body.contains("a@b.com"))
+    }
+
+    @Test func driveShareAnyoneUsesAnyoneType() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM2"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share F1 --anyone")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("\"type\":\"anyone\""))
+    }
+
+    @Test func driveUnshareDeletesPermission() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 204, body: Data()))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive unshare F1 --permission P1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("revoked: P1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1/permissions/P1") == true)
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()

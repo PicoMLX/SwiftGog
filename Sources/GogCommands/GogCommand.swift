@@ -168,6 +168,7 @@ struct GogDrive: AsyncParsableCommand {
             DriveLs.self, DriveGet.self, DriveSearch.self,
             DriveDownload.self, DriveUpload.self,
             DriveTrash.self, DriveUntrash.self, DriveRename.self, DriveMkdir.self,
+            DriveCopy.self, DriveMove.self, DriveShare.self, DriveUnshare.self,
             DrivePermissions.self, DriveRevisions.self, DriveAbout.self,
         ],
         aliases: ["drv"])
@@ -689,6 +690,181 @@ struct DriveMkdir: AsyncParsableCommand {
             "created folder: \(file.id ?? "")\t\(file.name ?? name)\n")
     }
 }
+
+/// `gog drive cp <id>` — copy a file, optionally renaming and/or into `--parent`.
+struct DriveCopy: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "cp",
+        abstract: "Copy a Drive file (--dry-run to preview).",
+        aliases: ["copy"])
+
+    @Argument(help: "Drive file ID to copy.") var id: String
+    @Option(name: .long, help: "Name for the copy (default: Google's \"Copy of …\").")
+    var name: String?
+    @Option(name: .long, help: "Destination parent folder ID.") var parent: String?
+    @Flag(name: .long, help: "Build the request but do not copy.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        struct CopyBody: Encodable {
+            let name: String?
+            let parents: [String]?
+        }
+        let payload = try JSONEncoder().encode(
+            CopyBody(name: name, parents: parent.map { [$0] }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not copying\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: "\(id)/copy")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: result)
+        Shell.bashCurrent.stdout("copied: \(file.id ?? "")\t\(file.name ?? "")\n")
+    }
+}
+
+/// `gog drive mv <id> --to <parentId>` — move a file to another folder. A Drive
+/// move is a parent edit (addParents/removeParents); when `--from` is omitted we
+/// look up the current parent(s) and remove them so the file isn't left in two
+/// places.
+struct DriveMove: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mv",
+        abstract: "Move a Drive file to another folder (--dry-run to preview).",
+        aliases: ["move"])
+
+    @Argument(help: "Drive file ID to move.") var id: String
+    @Option(name: .long, help: "Destination parent folder ID.") var to: String
+    @Option(name: .long, help: "Parent ID to remove (default: all current parents).")
+    var from: String?
+    @Flag(name: .long, help: "Build the request but do not move.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not moving\n")
+            Shell.bashCurrent.stdout("would move: \(id) -> \(to)\n")
+            return
+        }
+        var remove = from
+        if remove == nil {
+            let metaURL = try googleURL(
+                "https://www.googleapis.com/drive/v3/files", id: id,
+                query: [URLQueryItem(name: "fields", value: "parents")])
+            let meta = try JSONDecoder().decode(
+                DriveParents.self, from: try await GoogleHTTPClient().get(metaURL))
+            remove = (meta.parents ?? []).joined(separator: ",")
+        }
+        var query = [URLQueryItem(name: "addParents", value: to)]
+        if let remove, !remove.isEmpty {
+            query.append(URLQueryItem(name: "removeParents", value: remove))
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: id, query: query)
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: Data("{}".utf8))
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("moved: \(id) -> \(to)\n")
+    }
+}
+
+/// `gog drive share <id>` — grant access. `--email` shares with a person/group;
+/// `--anyone` makes a link anyone can open. Role: reader (default), writer, or
+/// commenter.
+struct DriveShare: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "share",
+        abstract: "Grant access to a Drive file (--dry-run to preview).")
+
+    @Argument(help: "Drive file or folder ID.") var id: String
+    @Option(name: .long, help: "Grantee email (a user or group).") var email: String?
+    @Flag(name: .long, help: "Share with anyone who has the link (no email).")
+    var anyone: Bool = false
+    @Option(name: .long, help: "Role: reader, writer, or commenter.")
+    var role: String = "reader"
+    @Flag(name: .long, help: "Build the request but do not share.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard ["reader", "writer", "commenter"].contains(role) else {
+            Shell.bashCurrent.stderr(
+                "gog: --role must be reader, writer, or commenter\n")
+            throw ExitCode(2)
+        }
+        guard anyone != (email != nil) else {
+            Shell.bashCurrent.stderr(
+                "gog: drive share needs exactly one of --email <addr> or --anyone\n")
+            throw ExitCode(2)
+        }
+        struct PermissionBody: Encodable {
+            let type: String
+            let role: String
+            let emailAddress: String?
+        }
+        let body = anyone
+            ? PermissionBody(type: "anyone", role: role, emailAddress: nil)
+            : PermissionBody(type: "user", role: role, emailAddress: email)
+        let payload = try JSONEncoder().encode(body)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not sharing\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: "\(id)/permissions")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let perm = try JSONDecoder().decode(SharePermission.self, from: result)
+        Shell.bashCurrent.stdout("shared: \(perm.id ?? "")\t\(role)\n")
+    }
+}
+
+/// `gog drive unshare <id> --permission <permId>` — revoke a permission (find
+/// IDs with `gog drive permissions`).
+struct DriveUnshare: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "unshare",
+        abstract: "Revoke a Drive permission by ID (--dry-run to preview).")
+
+    @Argument(help: "Drive file or folder ID.") var id: String
+    @Option(name: .long, help: "Permission ID (from `gog drive permissions`).")
+    var permission: String
+    @Flag(name: .long, help: "Show what would be revoked without revoking.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not revoking\n")
+            Shell.bashCurrent.stdout("would revoke: \(permission) on \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files",
+            id: "\(id)/permissions/\(permission)")
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("revoked: \(permission)\n")
+    }
+}
+
+private struct DriveParents: Decodable { let parents: [String]? }
+private struct SharePermission: Decodable { let id: String? }
 
 private struct DrivePermissionList: Decodable {
     struct Permission: Decodable {
