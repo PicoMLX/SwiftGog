@@ -1264,6 +1264,115 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.lastURL?.absoluteString.hasSuffix("/messages/M1/untrash") == true)
     }
 
+    // MARK: - Writes: Drive trash / untrash / rename / mkdir
+
+    @Test func driveTrashDryRunDoesNotTrash() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive trash F1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not trashing"))
+        #expect(run.stdout.contains("would trash: F1"))
+    }
+
+    @Test func driveTrashPatchesTrashedTrue() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"F1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive trash F1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("trashed: F1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1") == true)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#""trashed":true"#))
+    }
+
+    @Test func driveUntrashPatchesTrashedFalse() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"F1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive untrash F1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("untrashed: F1"))
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#""trashed":false"#))
+    }
+
+    @Test func driveRenameDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive rename F1 --name Renamed.txt --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not renaming"))
+        #expect(run.stdout.contains("Renamed.txt"))
+    }
+
+    @Test func driveRenamePatchesName() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"F1","name":"Renamed.txt"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive rename F1 --name Renamed.txt")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("renamed: F1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("Renamed.txt"))
+    }
+
+    @Test func driveMkdirDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive mkdir Reports --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not creating folder"))
+        #expect(run.stdout.contains("vnd.google-apps.folder"))
+    }
+
+    @Test func driveMkdirPostsFolderUnderParent() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"D9","name":"Reports"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mkdir Reports --parent P1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("created folder: D9"))
+        #expect(transport.lastMethod == "POST")
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("vnd.google-apps.folder"))
+        #expect(body.contains("P1"))
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()

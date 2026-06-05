@@ -167,6 +167,7 @@ struct GogDrive: AsyncParsableCommand {
         subcommands: [
             DriveLs.self, DriveGet.self, DriveSearch.self,
             DriveDownload.self, DriveUpload.self,
+            DriveTrash.self, DriveUntrash.self, DriveRename.self, DriveMkdir.self,
             DrivePermissions.self, DriveRevisions.self, DriveAbout.self,
         ],
         aliases: ["drv"])
@@ -556,6 +557,136 @@ struct DriveAbout: AsyncParsableCommand {
         let usage = about.storageQuota?.usage ?? "?"
         let limit = about.storageQuota?.limit ?? "unlimited"
         Shell.bashCurrent.stdout("quota: usage=\(usage) limit=\(limit)\n")
+    }
+}
+
+/// `gog drive trash <id>` — move a file to Trash (reversible via untrash).
+struct DriveTrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "trash",
+        abstract: "Move a Drive file to Trash (--dry-run to preview).")
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Flag(name: .long, help: "Show what would be trashed without trashing.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not trashing\n")
+            Shell.bashCurrent.stdout("would trash: \(id)\n")
+            return
+        }
+        let payload = try JSONEncoder().encode(["trashed": true])
+        let url = try googleURL("https://www.googleapis.com/drive/v3/files", id: id)
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("trashed: \(id)\n")
+    }
+}
+
+/// `gog drive untrash <id>` — restore a file from Trash.
+struct DriveUntrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "untrash",
+        abstract: "Restore a Drive file from Trash (--dry-run to preview).")
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Flag(name: .long, help: "Show what would be restored without restoring.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not untrashing\n")
+            Shell.bashCurrent.stdout("would untrash: \(id)\n")
+            return
+        }
+        let payload = try JSONEncoder().encode(["trashed": false])
+        let url = try googleURL("https://www.googleapis.com/drive/v3/files", id: id)
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("untrashed: \(id)\n")
+    }
+}
+
+/// `gog drive rename <id> --name <newName>` — rename a Drive file.
+struct DriveRename: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rename",
+        abstract: "Rename a Drive file (--dry-run to preview).")
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Option(name: .long, help: "New file name.") var name: String
+    @Flag(name: .long, help: "Build the request but do not rename.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let payload = try JSONEncoder().encode(["name": name])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not renaming\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL("https://www.googleapis.com/drive/v3/files", id: id)
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: result)
+        Shell.bashCurrent.stdout("renamed: \(file.id ?? id)\t\(file.name ?? name)\n")
+    }
+}
+
+/// `gog drive mkdir <name>` — create a folder, optionally inside `--parent`.
+struct DriveMkdir: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mkdir",
+        abstract: "Create a Drive folder (--dry-run to preview).")
+
+    @Argument(help: "Folder name.") var name: String
+    @Option(name: .long, help: "Parent folder ID (default: My Drive root).")
+    var parent: String?
+    @Flag(name: .long, help: "Build the request but do not create the folder.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        struct NewFolder: Encodable {
+            let name: String
+            let mimeType: String
+            let parents: [String]?
+        }
+        let payload = try JSONEncoder().encode(NewFolder(
+            name: name,
+            mimeType: "application/vnd.google-apps.folder",
+            parents: parent.map { [$0] }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating folder\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = URL(string: "https://www.googleapis.com/drive/v3/files")!
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: result)
+        Shell.bashCurrent.stdout(
+            "created folder: \(file.id ?? "")\t\(file.name ?? name)\n")
     }
 }
 
