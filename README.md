@@ -172,7 +172,7 @@ behaviour; the control simply moves from argv to host policy.
 | 0    | success                                                                   |
 | 1    | a Google API error (HTTP ≥ 400); the message is echoed to stderr          |
 | 2    | usage / validation error (bad flag, out-of-range `--max`, bad input)      |
-| 3    | refused by host policy (e.g. sending disabled, admin writes disabled)     |
+| 3    | refused by host policy (sending/admin writes disabled), or `--fail-empty` with no results |
 | 7    | fail-closed: no network configured, or missing / rejected credentials     |
 | 23   | could not write the requested sandbox destination                         |
 

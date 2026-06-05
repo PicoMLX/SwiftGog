@@ -187,6 +187,173 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stderr.contains("re-auth required"))
     }
 
+    @Test func failEmptyExitsThreeOnEmptyListing() async throws {
+        // --fail-empty: an empty listing exits 3 (gogcli's empty-results code).
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func emptyListingSucceedsWithoutFailEmpty() async throws {
+        // Default: an empty listing is success (exit 0) with a "No X" hint.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("No files"))
+    }
+
+    @Test func failEmptyAliasNonEmptyOnInlineCommand() async throws {
+        // The --non-empty alias works, and on a non-shared-helper command.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"users":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog admin users --non-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func failEmptyHonoredInJsonMode() async throws {
+        // --json --fail-empty must still exit 3 on an empty listing.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func failEmptyDoesNotFireWhenMorePages() async throws {
+        // An empty page with a nextPageToken means more may follow — don't fail.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200, body: Data(#"{"files":[],"nextPageToken":"more"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive ls --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("next page token: more"))
+    }
+
+    @Test func failEmptyTreatsOmittedArrayAsEmptyInJsonMode() async throws {
+        // Sheets omits `values` entirely for an empty range; --json --fail-empty
+        // must still exit 3, matching the non-JSON `values ?? []` path.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200,
+                body: Data(#"{"range":"Sheet1!A1:B2","majorDimension":"ROWS"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets get sheet1 A1:B2 --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
+    @Test func failEmptyChecksResultArrayNotSiblingInJsonMode() async throws {
+        // Calendar event listings carry a sibling `defaultReminders` array; an
+        // empty sibling next to a non-empty `items` must NOT count as empty.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = MockTransport(
+            response: HTTPResponse(
+                status: 200,
+                body: Data(#"{"defaultReminders":[],"items":[{"id":"e1"}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar events --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == .success)
+    }
+
+    @Test func driveSearchRequestsNextPageToken() async throws {
+        // DriveSearch's field mask must include nextPageToken so the
+        // pagination-aware --fail-empty guard can see when more pages exist.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        _ = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive search report --json")
+            }
+        }
+        #expect(transport.lastURL?.absoluteString.contains("nextPageToken") == true)
+    }
+
+    @Test func driveSearchAcceptsPageToken() async throws {
+        // A nextPageToken surfaced by search must be feedable back via --page,
+        // so a paging script isn't stuck with a token it can't use.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"files":[]}"#.utf8)))
+        _ = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive search report --page TOK123")
+            }
+        }
+        #expect(transport.lastURL?.absoluteString.contains("pageToken=TOK123") == true)
+    }
+
+    @Test func calendarEventsPageRequiresFrom() async throws {
+        // Paging calendar events needs an explicit --from so the next request
+        // replays the original time window (validation precedes any network use).
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog calendar events --page TOK")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--page requires --from"))
+        // The hint names the concrete fix: replay the original request's options.
+        #expect(run.stderr.contains("Repeat the original options"))
+    }
+
     @Test func driveLsRejectsBadMax() async throws {
         // Validation happens before any network/credential use, so this needs
         // neither — exit 2 with a usage diagnostic.
@@ -628,6 +795,74 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("e1\t2026-06-02T10:00:00Z\tStandup"))
     }
 
+    @Test func calendarEventsTokenEchoesReplayCommand() async throws {
+        // A surfaced page token must be spendable: the hint echoes a ready-to-run
+        // next-page command carrying the exact --from (the window the token is
+        // tied to), --max, and token, so the follow-up replays the same request.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"e1","summary":"Standup","#
+            + #""start":{"dateTime":"2026-06-02T10:00:00Z"}}],"nextPageToken":"NPT"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar events --from 2026-06-02T00:00:00Z --max 5")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("next page token: NPT"))
+        #expect(run.stderr.contains(
+            "next page: gog calendar events --from 2026-06-02T00:00:00Z --max 5 --page NPT"))
+    }
+
+    @Test func calendarEventsTokenEchoesGeneratedFromWhenDefaulted() async throws {
+        // Without --from the request uses a generated timeMin the caller never
+        // typed; the token is unusable unless the hint echoes that value. The
+        // echoed command must therefore carry a concrete --from and the token.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"e1","summary":"x","#
+            + #""start":{"dateTime":"2026-06-02T10:00:00Z"}}],"nextPageToken":"NPT"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar events")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("next page: gog calendar events --from "))
+        #expect(run.stderr.contains("--page NPT"))
+    }
+
+    @Test func calendarEventsJsonModeEchoesNextPage() async throws {
+        // --json returns early; the token in the raw response is still un-spendable
+        // (Google omits the generated timeMin), so the replay hint must fire here
+        // too — on stderr, leaving stdout pure JSON.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"items":[{"id":"e1"}],"nextPageToken":"NPT"}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar events --json")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("nextPageToken"))
+        #expect(run.stderr.contains("next page: gog calendar events --from "))
+        #expect(run.stderr.contains("--page NPT"))
+    }
+
     @Test func calendarCreateDryRunDoesNotCreate() async throws {
         let shell = Shell()
         shell.registerGogCommands()
@@ -741,6 +976,85 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         let sent = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(sent.contains(#""timeMin":"2030-01-01T00:00:00Z""#))
         #expect(sent.contains(#""timeMax":"2030-01-02T00:00:00Z""#))
+    }
+
+    @Test func calendarFreeBusyErrorsExitNonZeroNotEmpty() async throws {
+        // A calendar that reports errors[] failed to compute — it must not read
+        // as "free". With no busy slots it would otherwise hit the empty path;
+        // instead it exits non-zero (reason on stderr), even without --fail-empty.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"calendars":{"bad@x.com":{"errors":[{"reason":"notFound"}]}}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar freebusy --calendar bad@x.com")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+        #expect(run.stderr.contains("bad@x.com: notFound"))
+    }
+
+    @Test func calendarFreeBusyJsonErrorsExitNonZeroNotEmpty() async throws {
+        // Same contract in --json --fail-empty mode: errors[] must surface as a
+        // non-zero exit, not the empty/exit-3 "no conflicts" signal.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"calendars":{"bad@x.com":{"errors":[{"reason":"notFound"}]}}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar freebusy --calendar bad@x.com --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+        #expect(run.stdout.contains("notFound"))
+    }
+
+    @Test func calendarFreeBusyGroupErrorsExitNonZeroNotEmpty() async throws {
+        // A queried Google Group whose expansion fails appears only under
+        // groups.<id>.errors[] (no calendars entry). That's a failed lookup, so
+        // --json --fail-empty must exit non-zero, not exit 3 ("no conflicts").
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"groups":{"team@x.com":{"errors":[{"reason":"notFound"}]}},"calendars":{}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog calendar freebusy --calendar team@x.com --json --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+    }
+
+    @Test func calendarFreeBusyGroupErrorsHumanModeExitNonZero() async throws {
+        // Same in human mode: the group's failure reason is surfaced on stderr
+        // and the command exits non-zero instead of the empty path.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let json = #"{"groups":{"team@x.com":{"errors":[{"reason":"notFound"}]}},"calendars":{}}"#
+        let transport = MockTransport(
+            response: HTTPResponse(status: 200, body: Data(json.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog calendar freebusy --calendar team@x.com")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(1))
+        #expect(run.stderr.contains("team@x.com: notFound"))
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {

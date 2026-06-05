@@ -3,6 +3,50 @@ import Foundation
 import BashInterpreter
 import GogCore
 
+/// gogcli's `--fail-empty` (aliases `--non-empty` / `--require-results`): a
+/// reusable flag for list commands so a script can branch on "no results"
+/// without parsing the payload. Mixed into a command via `@OptionGroup`.
+struct FailEmptyFlag: ParsableArguments {
+    @Flag(name: [.customLong("fail-empty"), .customLong("non-empty"),
+                 .customLong("require-results")],
+          help: "Exit 3 if the listing has no results.")
+    var failEmpty: Bool = false
+
+    init() {}
+}
+
+/// Emit the "No <label>" hint for an empty listing, then — when the caller
+/// passed `--fail-empty` — exit 3 (gogcli's empty-results code). List commands
+/// and the gated mutations never share a command, so reusing 3 is unambiguous.
+func emitEmpty(_ label: String, failEmpty: Bool) throws {
+    Shell.bashCurrent.stderr("No \(label)\n")
+    if failEmpty { throw ExitCode(3) }
+}
+
+/// `--json --fail-empty` helper: decode the body with the *same* typed model the
+/// human-readable path uses and report whether the command's own result
+/// collection is empty and the listing is exhausted. Decoding the real model —
+/// rather than scanning for "the first array" — means an omitted collection
+/// counts as empty (Gmail, Tasks, People and Sheets all omit the array when there
+/// are no results, matching the non-JSON `field ?? []` paths), and a sibling array
+/// such as Calendar's `defaultReminders` can't trigger a false positive. A decode
+/// failure ⇒ `false` (don't fail); this paginated overload also holds off while a
+/// `nextPageToken` promises more.
+func jsonListingEmpty<T: Decodable, E>(
+    from body: Data, items: KeyPath<T, [E]?>, token: KeyPath<T, String?>) -> Bool {
+    guard let decoded = try? JSONDecoder().decode(T.self, from: body) else { return false }
+    if decoded[keyPath: token] != nil { return false }
+    return (decoded[keyPath: items] ?? []).isEmpty
+}
+
+/// Non-paginated variant for responses without a `nextPageToken` (e.g. Gmail
+/// labels, a single thread's messages, Sheets values, contact search).
+func jsonListingEmpty<T: Decodable, E>(
+    from body: Data, items: KeyPath<T, [E]?>) -> Bool {
+    guard let decoded = try? JSONDecoder().decode(T.self, from: body) else { return false }
+    return (decoded[keyPath: items] ?? []).isEmpty
+}
+
 /// Build a Google API URL from a constant base, an optional path-escaped id,
 /// and query items. Never force-unwraps, so a hostile id can't crash the
 /// process — it fails with exit 2 instead.
@@ -145,6 +189,7 @@ struct DriveLs: AsyncParsableCommand {
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -173,7 +218,7 @@ struct DriveLs: AsyncParsableCommand {
         comps.queryItems = query
 
         let body = try await GoogleHTTPClient().get(comps.url!)
-        try emitDriveFileList(body, json: json)
+        try emitDriveFileList(body, json: json, failEmpty: failEmptyFlag.failEmpty)
     }
 }
 
@@ -257,14 +302,15 @@ private struct DriveFileList: Decodable {
 
 /// Render a Drive v3 file-list response: raw JSON (`--json`) or a TSV of
 /// `id<TAB>name<TAB>mimeType`, with "No files" / next-page-token to stderr.
-private func emitDriveFileList(_ body: Data, json: Bool) throws {
+private func emitDriveFileList(_ body: Data, json: Bool, failEmpty: Bool) throws {
     if json {
         Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+        if failEmpty, jsonListingEmpty(from: body, items: \DriveFileList.files, token: \DriveFileList.nextPageToken) { throw ExitCode(3) }
         return
     }
     let listing = try JSONDecoder().decode(DriveFileList.self, from: body)
     let files = listing.files ?? []
-    if files.isEmpty { Shell.bashCurrent.stderr("No files\n") }
+    if files.isEmpty { try emitEmpty("files", failEmpty: failEmpty && listing.nextPageToken == nil) }
     for file in files {
         Shell.bashCurrent.stdout(
             "\(file.id ?? "")\t\(file.name ?? "")\t\(file.mimeType ?? "")\n")
@@ -310,8 +356,11 @@ struct DriveSearch: AsyncParsableCommand {
     @Argument(help: "Search text.") var query: String
     @Option(name: .long, help: "Maximum number of files to return (1–1000).")
     var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -329,10 +378,11 @@ struct DriveSearch: AsyncParsableCommand {
                 value: "(name contains '\(escaped)' or fullText contains '\(escaped)')"
                     + " and trashed = false"),
             URLQueryItem(name: "pageSize", value: String(max)),
-            URLQueryItem(name: "fields", value: "files(id,name,mimeType)"),
+            URLQueryItem(name: "fields", value: "nextPageToken,files(id,name,mimeType)"),
         ]
+        if let page { comps.queryItems?.append(URLQueryItem(name: "pageToken", value: page)) }
         let body = try await GoogleHTTPClient().get(comps.url!)
-        try emitDriveFileList(body, json: json)
+        try emitDriveFileList(body, json: json, failEmpty: failEmptyFlag.failEmpty)
     }
 }
 
@@ -383,6 +433,7 @@ struct DrivePermissions: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 100 else {
@@ -404,11 +455,12 @@ struct DrivePermissions: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \DrivePermissionList.permissions, token: \DrivePermissionList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DrivePermissionList.self, from: body)
         let permissions = list.permissions ?? []
-        if permissions.isEmpty { Shell.bashCurrent.stderr("No permissions\n") }
+        if permissions.isEmpty { try emitEmpty("permissions", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for perm in permissions {
             let who = perm.emailAddress ?? perm.domain ?? perm.displayName ?? ""
             Shell.bashCurrent.stdout(
@@ -433,6 +485,7 @@ struct DriveRevisions: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -456,11 +509,12 @@ struct DriveRevisions: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \DriveRevisionList.revisions, token: \DriveRevisionList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DriveRevisionList.self, from: body)
         let revisions = list.revisions ?? []
-        if revisions.isEmpty { Shell.bashCurrent.stderr("No revisions\n") }
+        if revisions.isEmpty { try emitEmpty("revisions", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for rev in revisions {
             let who = rev.lastModifyingUser?.displayName ?? ""
             Shell.bashCurrent.stdout(
@@ -566,8 +620,11 @@ struct GmailMessages: AsyncParsableCommand {
     var query: String?
     @Option(name: .long, help: "Maximum messages to return (1–500).")
     var max: Int = 100
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 500 else {
@@ -578,16 +635,18 @@ struct GmailMessages: AsyncParsableCommand {
             string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
         var query = [URLQueryItem(name: "maxResults", value: String(max))]
         if let q = self.query { query.append(URLQueryItem(name: "q", value: q)) }
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
         comps.queryItems = query
 
         let body = try await GoogleHTTPClient().get(comps.url!)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \GmailMessageList.messages, token: \GmailMessageList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(GmailMessageList.self, from: body)
         let messages = list.messages ?? []
-        if messages.isEmpty { Shell.bashCurrent.stderr("No messages\n") }
+        if messages.isEmpty { try emitEmpty("messages", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for message in messages {
             Shell.bashCurrent.stdout("\(message.id ?? "")\t\(message.threadId ?? "")\n")
         }
@@ -752,6 +811,7 @@ struct GmailDrafts: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 500 else {
@@ -765,11 +825,12 @@ struct GmailDrafts: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \GmailDraftList.drafts, token: \GmailDraftList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(GmailDraftList.self, from: body)
         let drafts = list.drafts ?? []
-        if drafts.isEmpty { Shell.bashCurrent.stderr("No drafts\n") }
+        if drafts.isEmpty { try emitEmpty("drafts", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for draft in drafts {
             Shell.bashCurrent.stdout("\(draft.id ?? "")\t\(draft.message?.id ?? "")\n")
         }
@@ -820,6 +881,7 @@ struct GmailThreads: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 500 else {
@@ -834,11 +896,12 @@ struct GmailThreads: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \GmailThreadList.threads, token: \GmailThreadList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(GmailThreadList.self, from: body)
         let threads = list.threads ?? []
-        if threads.isEmpty { Shell.bashCurrent.stderr("No threads\n") }
+        if threads.isEmpty { try emitEmpty("threads", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for thread in threads {
             Shell.bashCurrent.stdout(
                 "\(thread.id ?? "")\t\(tsvEscaped(thread.snippet ?? ""))\n")
@@ -858,6 +921,7 @@ struct GmailThreadGet: AsyncParsableCommand {
     @Argument(help: "Gmail thread ID.") var id: String
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         let url = try googleURL(
@@ -870,11 +934,12 @@ struct GmailThreadGet: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \GmailThread.messages) { throw ExitCode(3) }
             return
         }
         let thread = try JSONDecoder().decode(GmailThread.self, from: body)
         let messages = thread.messages ?? []
-        if messages.isEmpty { Shell.bashCurrent.stderr("No messages in thread\n") }
+        if messages.isEmpty { try emitEmpty("messages in thread", failEmpty: failEmptyFlag.failEmpty) }
         for message in messages {
             let headers = message.payload?.headers ?? []
             func header(_ name: String) -> String {
@@ -901,6 +966,7 @@ struct GmailAttachments: AsyncParsableCommand {
     @Argument(help: "Gmail message ID.") var messageId: String
     @Flag(name: [.customShort("j"), .long], help: "Emit the attachment list as JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         let url = try googleURL(
@@ -934,9 +1000,10 @@ struct GmailAttachments: AsyncParsableCommand {
         if json {
             let encoded = try JSONEncoder().encode(["attachments": attachments])
             Shell.bashCurrent.stdout(String(decoding: encoded, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, attachments.isEmpty { throw ExitCode(3) }
             return
         }
-        if attachments.isEmpty { Shell.bashCurrent.stderr("No attachments\n") }
+        if attachments.isEmpty { try emitEmpty("attachments", failEmpty: failEmptyFlag.failEmpty) }
         for att in attachments {
             let size = att.size.map(String.init) ?? ""
             Shell.bashCurrent.stdout(
@@ -1052,12 +1119,30 @@ struct CalendarEvents: AsyncParsableCommand {
     var max: Int = 100
     @Option(name: .long, help: "Earliest start time (RFC3339).")
     var from: String?
+    @Option(name: .long, help: "Page token from a previous listing.")
+    var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 2500 else {
             Shell.bashCurrent.stderr("gog: --max must be between 1 and 2500\n")
+            throw ExitCode(2)
+        }
+        // Calendar paging must replay the original request: the time window is
+        // baked into the page token. `timeMin` defaults to "now" when --from is
+        // omitted, which a later --page call can't reproduce — so require an
+        // explicit --from when paging rather than silently shifting the window.
+        if page != nil, from == nil {
+            Shell.bashCurrent.stderr(
+                "gog: calendar events --page requires --from "
+                    + "(the token is tied to the original time window).\n"
+                    + "The previous listing printed a ready-to-run command after "
+                    + "\"next page:\" — use that.\n"
+                    + "Repeat the original options if you no longer have it "
+                    + "(same --from, plus --max if you set one), e.g.:\n"
+                    + "  gog calendar events --from 2026-06-03T15:00:00Z --max 10 --page XYZ\n")
             throw ExitCode(2)
         }
         var comps = URLComponents(string:
@@ -1065,29 +1150,47 @@ struct CalendarEvents: AsyncParsableCommand {
         // Default to upcoming events: orderBy=startTime needs a timeMin to mean
         // "from now" rather than from the start of the calendar.
         let timeMin = from ?? ISO8601DateFormatter().string(from: Date())
-        let query = [
+        var query = [
             URLQueryItem(name: "maxResults", value: String(max)),
             URLQueryItem(name: "singleEvents", value: "true"),
             URLQueryItem(name: "orderBy", value: "startTime"),
             URLQueryItem(name: "timeMin", value: timeMin),
         ]
+        if let page { query.append(URLQueryItem(name: "pageToken", value: page)) }
         comps.queryItems = query
 
         let body = try await GoogleHTTPClient().get(comps.url!)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            // The raw JSON omits the generated timeMin, so a token in it is just
+            // as un-spendable as in human mode — echo the replay command too.
+            emitNextPageHint(
+                (try? JSONDecoder().decode(CalEventList.self, from: body))?.nextPageToken,
+                timeMin: timeMin)
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \CalEventList.items, token: \CalEventList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(CalEventList.self, from: body)
         let items = list.items ?? []
-        if items.isEmpty { Shell.bashCurrent.stderr("No events\n") }
+        if items.isEmpty { try emitEmpty("events", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for event in items {
             Shell.bashCurrent.stdout(
                 "\(event.id ?? "")\t\(event.when)\t\(event.summary ?? "")\n")
         }
-        if let next = list.nextPageToken {
-            Shell.bashCurrent.stderr("next page token: \(next)\n")
-        }
+        emitNextPageHint(list.nextPageToken, timeMin: timeMin)
+    }
+
+    /// Echo a ready-to-run next-page command so a surfaced token is spendable in
+    /// either mode. `--page` requires `--from`, and a default run's generated
+    /// `timeMin` is in neither the JSON response nor the human output — so print
+    /// the effective --from/--max next to the token. stderr keeps --json stdout
+    /// pure.
+    private func emitNextPageHint(_ token: String?, timeMin: String) {
+        guard let token else { return }
+        Shell.bashCurrent.stderr(
+            "next page token: \(token)\n"
+                + "next page: gog calendar events"
+                + " --from \(timeMin) --max \(max) --page \(token)\n")
     }
 }
 
@@ -1182,6 +1285,7 @@ struct CalendarCalendars: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 250 else {
@@ -1195,11 +1299,12 @@ struct CalendarCalendars: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \CalListResponse.items, token: \CalListResponse.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(CalListResponse.self, from: body)
         let calendars = list.items ?? []
-        if calendars.isEmpty { Shell.bashCurrent.stderr("No calendars\n") }
+        if calendars.isEmpty { try emitEmpty("calendars", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for cal in calendars {
             let primary = (cal.primary == true) ? "\tprimary" : ""
             Shell.bashCurrent.stdout(
@@ -1228,6 +1333,7 @@ struct CalendarFreeBusy: AsyncParsableCommand {
     var calendar: [String] = []
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         let now = Date()
@@ -1268,15 +1374,37 @@ struct CalendarFreeBusy: AsyncParsableCommand {
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            let decoded = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
+            let cals = decoded.calendars ?? [:]
+            // A calendar or group that returned errors[] failed to compute — it
+            // is not "free". Surface that as a non-zero exit so --fail-empty's
+            // exit 3 ("no conflicts") can't mask an unreadable/not-found target.
+            let anyErrors = cals.values.contains { !($0.errors ?? []).isEmpty }
+                || (decoded.groups ?? [:]).values.contains { !($0.errors ?? []).isEmpty }
+            if anyErrors { throw ExitCode(1) }
+            if failEmptyFlag.failEmpty,
+                !cals.values.contains(where: { !($0.busy ?? []).isEmpty }) {
+                throw ExitCode(3)
+            }
             return
         }
         let response = try JSONDecoder().decode(FreeBusyResponse.self, from: result)
         let calendars = response.calendars ?? [:]
         var anyBusy = false
+        var anyErrors = false
+        // Group-expansion failures (groups.<id>.errors[]) are lookup failures too,
+        // and a failed group contributes no `calendars` entry — check it first.
+        for id in (response.groups ?? [:]).keys.sorted() {
+            guard let errors = response.groups?[id]?.errors, !errors.isEmpty else { continue }
+            anyErrors = true
+            let reasons = errors.compactMap(\.reason).joined(separator: ",")
+            Shell.bashCurrent.stderr("gog: \(id): \(reasons)\n")
+        }
         // Iterate the returned keys in a stable (sorted) order.
         for id in calendars.keys.sorted() {
             guard let cal = calendars[id] else { continue }
             if let errors = cal.errors, !errors.isEmpty {
+                anyErrors = true
                 let reasons = errors.compactMap(\.reason).joined(separator: ",")
                 Shell.bashCurrent.stderr("gog: \(id): \(reasons)\n")
             }
@@ -1286,7 +1414,11 @@ struct CalendarFreeBusy: AsyncParsableCommand {
                     "\(id)\t\(slot.start ?? "")\t\(slot.end ?? "")\n")
             }
         }
-        if !anyBusy { Shell.bashCurrent.stderr("No busy intervals\n") }
+        // A calendar or group that returned errors[] failed to compute — it is
+        // not "free". Exit non-zero (reasons already on stderr) rather than
+        // letting an empty or --fail-empty result read as "no conflicts".
+        if anyErrors { throw ExitCode(1) }
+        if !anyBusy { try emitEmpty("busy intervals", failEmpty: failEmptyFlag.failEmpty) }
     }
 }
 
@@ -1301,13 +1433,17 @@ private struct CalListResponse: Decodable {
     let nextPageToken: String?
 }
 private struct FreeBusyResponse: Decodable {
+    struct Err: Decodable { let reason: String? }
     struct Cal: Decodable {
         struct Slot: Decodable { let start: String?; let end: String? }
-        struct Err: Decodable { let reason: String? }
         let busy: [Slot]?
         let errors: [Err]?
     }
+    // A queried Google Group is reported under `groups`; errors[] there means
+    // expansion failed (and the group contributes no `calendars` entry).
+    struct Group: Decodable { let errors: [Err]? }
     let calendars: [String: Cal]?
+    let groups: [String: Group]?
 }
 
 // MARK: - Contacts (People API connections)
@@ -1336,6 +1472,7 @@ struct ContactsList: AsyncParsableCommand {
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -1353,11 +1490,12 @@ struct ContactsList: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \ContactList.connections, token: \ContactList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ContactList.self, from: body)
         let people = list.connections ?? []
-        if people.isEmpty { Shell.bashCurrent.stderr("No contacts\n") }
+        if people.isEmpty { try emitEmpty("contacts", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for person in people {
             let name = person.names?.first?.displayName ?? ""
             let email = person.emailAddresses?.first?.value ?? ""
@@ -1423,6 +1561,7 @@ struct ContactsSearch: AsyncParsableCommand {
     @Option(name: .long, help: "Maximum results to return (1–30).") var max: Int = 10
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         // searchContacts caps pageSize at 30 and does not use page tokens.
@@ -1451,11 +1590,12 @@ struct ContactsSearch: AsyncParsableCommand {
         let body = try await client.get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \ContactSearchResults.results) { throw ExitCode(3) }
             return
         }
         let response = try JSONDecoder().decode(ContactSearchResults.self, from: body)
         let results = response.results ?? []
-        if results.isEmpty { Shell.bashCurrent.stderr("No matches\n") }
+        if results.isEmpty { try emitEmpty("matches", failEmpty: failEmptyFlag.failEmpty) }
         for person in results.compactMap(\.person) {
             let name = person.names?.first?.displayName ?? ""
             let email = person.emailAddresses?.first?.value ?? ""
@@ -1476,6 +1616,7 @@ struct ContactsOther: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -1492,11 +1633,12 @@ struct ContactsOther: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \OtherContactList.otherContacts, token: \OtherContactList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(OtherContactList.self, from: body)
         let people = list.otherContacts ?? []
-        if people.isEmpty { Shell.bashCurrent.stderr("No other contacts\n") }
+        if people.isEmpty { try emitEmpty("other contacts", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for person in people {
             let name = person.names?.first?.displayName ?? ""
             let email = person.emailAddresses?.first?.value ?? ""
@@ -1541,6 +1683,7 @@ struct TasksLists: AsyncParsableCommand {
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -1554,11 +1697,12 @@ struct TasksLists: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \TaskListCollection.items, token: \TaskListCollection.nextPageToken) { throw ExitCode(3) }
             return
         }
         let result = try JSONDecoder().decode(TaskListCollection.self, from: body)
         let lists = result.items ?? []
-        if lists.isEmpty { Shell.bashCurrent.stderr("No task lists\n") }
+        if lists.isEmpty { try emitEmpty("task lists", failEmpty: failEmptyFlag.failEmpty && result.nextPageToken == nil) }
         for list in lists {
             Shell.bashCurrent.stdout("\(list.id ?? "")\t\(list.title ?? "")\n")
         }
@@ -1582,6 +1726,7 @@ struct TasksList: AsyncParsableCommand {
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 100 else {
@@ -1596,11 +1741,12 @@ struct TasksList: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \TaskCollection.items, token: \TaskCollection.nextPageToken) { throw ExitCode(3) }
             return
         }
         let result = try JSONDecoder().decode(TaskCollection.self, from: body)
         let tasks = result.items ?? []
-        if tasks.isEmpty { Shell.bashCurrent.stderr("No tasks\n") }
+        if tasks.isEmpty { try emitEmpty("tasks", failEmpty: failEmptyFlag.failEmpty && result.nextPageToken == nil) }
         for task in tasks {
             Shell.bashCurrent.stdout("\(task.id ?? "")\t\(task.status ?? "")\t\(task.title ?? "")\n")
         }
@@ -1786,18 +1932,20 @@ struct SheetsGet: AsyncParsableCommand {
     @Argument(help: "A1 range, e.g. Sheet1!A1:D20.") var range: String
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         let url = try sheetsValuesURL(spreadsheetId: spreadsheetId, range: range)
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \ValueRange.values) { throw ExitCode(3) }
             return
         }
         let result = try JSONDecoder().decode(ValueRange.self, from: body)
         let rows = result.values ?? []
         if rows.isEmpty {
-            Shell.bashCurrent.stderr("No values\n")
+            try emitEmpty("values", failEmpty: failEmptyFlag.failEmpty)
             return
         }
         // Sheets omits trailing empty rows/columns; pad to the requested range
@@ -2002,6 +2150,7 @@ struct ChatSpaces: AsyncParsableCommand {
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -2014,11 +2163,12 @@ struct ChatSpaces: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \ChatSpaceList.spaces, token: \ChatSpaceList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ChatSpaceList.self, from: body)
         let spaces = list.spaces ?? []
-        if spaces.isEmpty { Shell.bashCurrent.stderr("No spaces\n") }
+        if spaces.isEmpty { try emitEmpty("spaces", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for space in spaces {
             Shell.bashCurrent.stdout(
                 "\(space.name ?? "")\t\(tsvEscaped(space.displayName ?? ""))\n")
@@ -2042,6 +2192,7 @@ struct ChatMessages: AsyncParsableCommand {
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -2055,11 +2206,12 @@ struct ChatMessages: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \ChatMessageList.messages, token: \ChatMessageList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ChatMessageList.self, from: body)
         let messages = list.messages ?? []
-        if messages.isEmpty { Shell.bashCurrent.stderr("No messages\n") }
+        if messages.isEmpty { try emitEmpty("messages", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for message in messages {
             Shell.bashCurrent.stdout(
                 "\(message.name ?? "")\t\(tsvEscaped(message.text ?? ""))\n")
@@ -2170,6 +2322,7 @@ struct FormsResponses: AsyncParsableCommand {
     var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 5000 else {
@@ -2184,11 +2337,12 @@ struct FormsResponses: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \FormResponseList.responses, token: \FormResponseList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(FormResponseList.self, from: body)
         let responses = list.responses ?? []
-        if responses.isEmpty { Shell.bashCurrent.stderr("No responses\n") }
+        if responses.isEmpty { try emitEmpty("responses", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for response in responses {
             Shell.bashCurrent.stdout(
                 "\(response.responseId ?? "")\t\(response.createTime ?? "")\n")
@@ -2222,17 +2376,19 @@ struct GmailLabels: AsyncParsableCommand {
 
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         let url = try googleURL("https://gmail.googleapis.com/gmail/v1/users/me/labels")
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \LabelList.labels) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(LabelList.self, from: body)
         let labels = list.labels ?? []
-        if labels.isEmpty { Shell.bashCurrent.stderr("No labels\n") }
+        if labels.isEmpty { try emitEmpty("labels", failEmpty: failEmptyFlag.failEmpty) }
         for label in labels {
             Shell.bashCurrent.stdout("\(label.id ?? "")\t\(tsvEscaped(label.name ?? ""))\n")
         }
@@ -2299,6 +2455,7 @@ struct YouTubeSearch: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous search.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 50 else {
@@ -2317,11 +2474,12 @@ struct YouTubeSearch: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \YTSearchList.items, token: \YTSearchList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(YTSearchList.self, from: body)
         let results = list.items ?? []
-        if results.isEmpty { Shell.bashCurrent.stderr("No results\n") }
+        if results.isEmpty { try emitEmpty("results", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for item in results {
             Shell.bashCurrent.stdout(
                 "\(item.id?.videoId ?? "")\t\(tsvEscaped(item.snippet?.title ?? ""))\n")
@@ -2342,6 +2500,7 @@ struct YouTubePlaylists: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 50 else {
@@ -2359,11 +2518,12 @@ struct YouTubePlaylists: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \YTPlaylistList.items, token: \YTPlaylistList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(YTPlaylistList.self, from: body)
         let playlists = list.items ?? []
-        if playlists.isEmpty { Shell.bashCurrent.stderr("No playlists\n") }
+        if playlists.isEmpty { try emitEmpty("playlists", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for playlist in playlists {
             Shell.bashCurrent.stdout(
                 "\(playlist.id ?? "")\t\(tsvEscaped(playlist.snippet?.title ?? ""))\n")
@@ -2576,6 +2736,7 @@ struct AdminUsers: AsyncParsableCommand {
     var query: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 500 else {
@@ -2598,11 +2759,12 @@ struct AdminUsers: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \DirUserList.users, token: \DirUserList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DirUserList.self, from: body)
         let users = list.users ?? []
-        if users.isEmpty { Shell.bashCurrent.stderr("No users\n") }
+        if users.isEmpty { try emitEmpty("users", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for user in users {
             let status = (user.suspended ?? false) ? "suspended" : "active"
             Shell.bashCurrent.stdout(
@@ -2659,6 +2821,7 @@ struct AdminGroups: AsyncParsableCommand {
     var user: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 200 else {
@@ -2680,11 +2843,12 @@ struct AdminGroups: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \DirGroupList.groups, token: \DirGroupList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DirGroupList.self, from: body)
         let groups = list.groups ?? []
-        if groups.isEmpty { Shell.bashCurrent.stderr("No groups\n") }
+        if groups.isEmpty { try emitEmpty("groups", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for group in groups {
             Shell.bashCurrent.stdout(
                 "\(group.email ?? "")\t\(tsvEscaped(group.name ?? ""))\tmembers=\(group.directMembersCount ?? "0")\n")
@@ -2737,6 +2901,7 @@ struct AdminMembers: AsyncParsableCommand {
     @Option(name: .long, help: "Filter by roles, e.g. 'OWNER,MANAGER'.") var roles: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 200 else {
@@ -2753,11 +2918,12 @@ struct AdminMembers: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \DirMemberList.members, token: \DirMemberList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(DirMemberList.self, from: body)
         let members = list.members ?? []
-        if members.isEmpty { Shell.bashCurrent.stderr("No members\n") }
+        if members.isEmpty { try emitEmpty("members", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for member in members {
             Shell.bashCurrent.stdout(
                 "\(member.email ?? member.id ?? "")\t\(member.role ?? "")\t\(member.type ?? "")\n")
@@ -2814,6 +2980,7 @@ struct AdminActivities: AsyncParsableCommand {
     @Option(name: .long, help: "Page token from a previous listing.") var page: String?
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
 
     func run() async throws {
         guard max > 0, max <= 1000 else {
@@ -2831,11 +2998,12 @@ struct AdminActivities: AsyncParsableCommand {
         let body = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: body, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: body, items: \ReportActivityList.items, token: \ReportActivityList.nextPageToken) { throw ExitCode(3) }
             return
         }
         let list = try JSONDecoder().decode(ReportActivityList.self, from: body)
         let activities = list.items ?? []
-        if activities.isEmpty { Shell.bashCurrent.stderr("No activities\n") }
+        if activities.isEmpty { try emitEmpty("activities", failEmpty: failEmptyFlag.failEmpty && list.nextPageToken == nil) }
         for activity in activities {
             let time = activity.id?.time ?? ""
             let actor = activity.actor?.email ?? activity.actor?.profileId ?? ""

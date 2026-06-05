@@ -208,6 +208,9 @@ gog version
 
 - With `--json` the output is structured JSON; otherwise it is a compact
   human / TSV form (id, then key fields, tab-separated).
+- List commands accept `--fail-empty` (aliases `--non-empty` /
+  `--require-results`): exit 3 instead of 0 when there are no results, so a
+  script can branch without parsing the output.
 - Surface: identity, Drive, Gmail, Calendar, Contacts, Tasks, Docs, Sheets,
   Chat, Slides, Forms, YouTube, Admin (Directory + Reports). More services are planned —
   see `PLAN.md`.
