@@ -1936,6 +1936,7 @@ struct GogContacts: AsyncParsableCommand {
         subcommands: [
             ContactsList.self, ContactsGet.self,
             ContactsSearch.self, ContactsOther.self,
+            ContactsCreate.self, ContactsUpdate.self, ContactsDelete.self,
         ],
         aliases: ["contact"])
 }
@@ -2027,6 +2028,155 @@ private struct Contact: Decodable {
     let resourceName: String?
     let names: [Name]?
     let emailAddresses: [Email]?
+}
+
+/// The writable subset of a People `Person` — `names`/`emails`/`phones` plus the
+/// `etag` that `updateContact` requires. Optionals are omitted when nil, so the
+/// same type serves create (no etag) and update (etag + only changed fields).
+private struct ContactWrite: Encodable {
+    struct Name: Encodable { let unstructuredName: String }
+    struct Value: Encodable { let value: String }
+    let etag: String?
+    let names: [Name]?
+    let emailAddresses: [Value]?
+    let phoneNumbers: [Value]?
+}
+private struct ContactEtag: Decodable { let etag: String? }
+
+/// `gog contacts create --name … [--email …] [--phone …]` — create a contact.
+struct ContactsCreate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a contact (--dry-run to preview).")
+
+    @Option(name: .long, help: "Full name.") var name: String?
+    @Option(name: .long, help: "Email address (repeatable).") var email: [String] = []
+    @Option(name: .long, help: "Phone number (repeatable).") var phone: [String] = []
+    @Flag(name: .long, help: "Build the request but do not create.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard name != nil || !email.isEmpty || !phone.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: contacts create needs at least one of "
+                    + "--name, --email, --phone\n")
+            throw ExitCode(2)
+        }
+        let payload = try JSONEncoder().encode(ContactWrite(
+            etag: nil,
+            names: name.map { [ContactWrite.Name(unstructuredName: $0)] },
+            emailAddresses: email.isEmpty
+                ? nil : email.map { ContactWrite.Value(value: $0) },
+            phoneNumbers: phone.isEmpty
+                ? nil : phone.map { ContactWrite.Value(value: $0) }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = URL(string:
+            "https://people.googleapis.com/v1/people:createContact")!
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let person = try JSONDecoder().decode(Contact.self, from: result)
+        Shell.bashCurrent.stdout("created: \(person.resourceName ?? "")\n")
+    }
+}
+
+/// `gog contacts update <resourceName> …` — replace a contact's name/emails/
+/// phones. People's `updateContact` requires the current etag, so we read it
+/// first, then PATCH only the fields named on the command line.
+struct ContactsUpdate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Update a contact's fields (--dry-run to preview).")
+
+    @Argument(help: "Contact resource name, e.g. people/c123.")
+    var resourceName: String
+    @Option(name: .long, help: "New full name.") var name: String?
+    @Option(name: .long, help: "Replace emails (repeatable).") var email: [String] = []
+    @Option(name: .long, help: "Replace phone numbers (repeatable).")
+    var phone: [String] = []
+    @Flag(name: .long, help: "Build the request but do not update.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        var fields: [String] = []
+        if name != nil { fields.append("names") }
+        if !email.isEmpty { fields.append("emailAddresses") }
+        if !phone.isEmpty { fields.append("phoneNumbers") }
+        guard !fields.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: contacts update needs at least one of "
+                    + "--name, --email, --phone\n")
+            throw ExitCode(2)
+        }
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not updating\n")
+            Shell.bashCurrent.stdout(
+                "would update \(resourceName): \(fields.joined(separator: ","))\n")
+            return
+        }
+        // updateContact rejects writes without the person's current etag.
+        let getURL = try googleURL(
+            "https://people.googleapis.com/v1", id: resourceName,
+            query: [URLQueryItem(name: "personFields",
+                                 value: fields.joined(separator: ","))])
+        let etag = try JSONDecoder().decode(
+            ContactEtag.self, from: try await GoogleHTTPClient().get(getURL)).etag
+        let payload = try JSONEncoder().encode(ContactWrite(
+            etag: etag,
+            names: name.map { [ContactWrite.Name(unstructuredName: $0)] },
+            emailAddresses: email.isEmpty
+                ? nil : email.map { ContactWrite.Value(value: $0) },
+            phoneNumbers: phone.isEmpty
+                ? nil : phone.map { ContactWrite.Value(value: $0) }))
+        let url = try googleURL(
+            "https://people.googleapis.com/v1",
+            id: "\(resourceName):updateContact",
+            query: [URLQueryItem(name: "updatePersonFields",
+                                 value: fields.joined(separator: ","))])
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let person = try JSONDecoder().decode(Contact.self, from: result)
+        Shell.bashCurrent.stdout("updated: \(person.resourceName ?? resourceName)\n")
+    }
+}
+
+/// `gog contacts delete <resourceName>` — delete a contact.
+struct ContactsDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete a contact (--dry-run to preview).",
+        aliases: ["rm"])
+
+    @Argument(help: "Contact resource name, e.g. people/c123.")
+    var resourceName: String
+    @Flag(name: .long, help: "Show what would be deleted without deleting.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete: \(resourceName)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://people.googleapis.com/v1",
+            id: "\(resourceName):deleteContact")
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("deleted: \(resourceName)\n")
+    }
 }
 
 /// `gog contacts search <query>` — search your contacts (People searchContacts).

@@ -1590,6 +1590,109 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.lastURL?.absoluteString.contains(":clear") == true)
     }
 
+    // MARK: - Writes: Contacts create / update / delete
+
+    @Test func contactsCreateRequiresAField() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog contacts create")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--name, --email, --phone"))
+    }
+
+    @Test func contactsCreateDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog contacts create --name 'Jane Doe' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not creating"))
+        #expect(run.stdout.contains("unstructuredName") && run.stdout.contains("Jane Doe"))
+    }
+
+    @Test func contactsCreatePostsToCreateContact() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"resourceName":"people/c1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog contacts create --name 'Jane Doe' --email jane@x.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("created: people/c1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("people:createContact") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("Jane Doe") && body.contains("jane@x.com"))
+    }
+
+    @Test func contactsUpdateRequiresAField() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog contacts update people/c1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--name, --email, --phone"))
+    }
+
+    @Test func contactsUpdateReadsEtagThenPatches() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The GET (etag lookup) and the PATCH both see this response; the GET
+        // decode supplies the etag the PATCH body must carry.
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"resourceName":"people/c1","etag":"ETAG1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog contacts update people/c1 --name 'Jane R'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("updated: people/c1"))
+        #expect(transport.urls.count == 2)            // etag lookup, then patch
+        #expect(transport.lastMethod == "PATCH")
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains(":updateContact") && url.contains("updatePersonFields=names"))
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("ETAG1") && body.contains("Jane R"))
+    }
+
+    @Test func contactsDeleteDryRunDoesNotDelete() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog contacts delete people/c1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not deleting"))
+        #expect(run.stdout.contains("would delete: people/c1"))
+    }
+
+    @Test func contactsDeleteCallsDeleteContact() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts delete people/c1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("deleted: people/c1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("people/c1:deleteContact") == true)
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()
