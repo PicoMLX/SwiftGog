@@ -602,6 +602,7 @@ struct GogGmail: AsyncParsableCommand {
         abstract: "Gmail.",
         subcommands: [
             GmailMessages.self, GmailGet.self, GmailSend.self, GmailLabels.self,
+            GmailModify.self, GmailTrash.self, GmailUntrash.self,
             GmailDrafts.self, GmailDraft.self,
             GmailThreads.self, GmailThreadGet.self,
             GmailAttachments.self, GmailAttachment.self,
@@ -1050,6 +1051,102 @@ struct GmailAttachment: AsyncParsableCommand {
             throw ExitCode(23)
         }
         Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
+}
+
+/// `gog gmail modify <id>` — add/remove labels on a message (e.g. mark read by
+/// removing UNREAD, star by adding STARRED). Takes label *IDs*, not names —
+/// look them up with `gog gmail labels`.
+struct GmailModify: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "modify",
+        abstract: "Add/remove a message's labels by ID (--dry-run to preview).")
+
+    @Argument(help: "Gmail message ID.") var id: String
+    @Option(name: .long, help: "Label ID to add (repeatable, e.g. STARRED).")
+    var addLabel: [String] = []
+    @Option(name: .long, help: "Label ID to remove (repeatable, e.g. UNREAD).")
+    var removeLabel: [String] = []
+    @Flag(name: .long, help: "Build the request but do not modify the message.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        guard !addLabel.isEmpty || !removeLabel.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: gmail modify needs at least one --add-label or "
+                    + "--remove-label (label IDs from `gog gmail labels`)\n")
+            throw ExitCode(2)
+        }
+        struct ModifyBody: Encodable {
+            let addLabelIds: [String]
+            let removeLabelIds: [String]
+        }
+        let payload = try JSONEncoder().encode(
+            ModifyBody(addLabelIds: addLabel, removeLabelIds: removeLabel))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not modifying\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            id: "\(id)/modify")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("modified: \(id)\n")
+    }
+}
+
+/// `gog gmail trash <id>` — move a message to Trash (reversible via untrash).
+struct GmailTrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "trash",
+        abstract: "Move a message to Trash (--dry-run to preview).")
+
+    @Argument(help: "Gmail message ID.") var id: String
+    @Flag(name: .long, help: "Show what would be trashed without trashing.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not trashing\n")
+            Shell.bashCurrent.stdout("would trash: \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            id: "\(id)/trash")
+        _ = try await GoogleHTTPClient().post(url, jsonBody: Data())
+        Shell.bashCurrent.stdout("trashed: \(id)\n")
+    }
+}
+
+/// `gog gmail untrash <id>` — restore a message from Trash.
+struct GmailUntrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "untrash",
+        abstract: "Restore a message from Trash (--dry-run to preview).")
+
+    @Argument(help: "Gmail message ID.") var id: String
+    @Flag(name: .long, help: "Show what would be restored without restoring.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not untrashing\n")
+            Shell.bashCurrent.stdout("would untrash: \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            id: "\(id)/untrash")
+        _ = try await GoogleHTTPClient().post(url, jsonBody: Data())
+        Shell.bashCurrent.stdout("untrashed: \(id)\n")
     }
 }
 

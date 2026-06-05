@@ -1178,6 +1178,92 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.lastURL?.absoluteString.contains("/lists/L9/tasks/T1") == true)
     }
 
+    // MARK: - Writes: Gmail modify / trash / untrash
+
+    @Test func gmailModifyRequiresALabel() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog gmail modify M1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--add-label"))
+    }
+
+    @Test func gmailModifyDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog gmail modify M1 --remove-label UNREAD --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not modifying"))
+        #expect(run.stdout.contains("UNREAD"))
+    }
+
+    @Test func gmailModifyPostsToModifyEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"M1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog gmail modify M1 --add-label STARRED --remove-label UNREAD")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("modified: M1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/messages/M1/modify") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("addLabelIds") && body.contains("STARRED"))
+        #expect(body.contains("removeLabelIds") && body.contains("UNREAD"))
+    }
+
+    @Test func gmailTrashDryRunDoesNotTrash() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog gmail trash M1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not trashing"))
+        #expect(run.stdout.contains("would trash: M1"))
+    }
+
+    @Test func gmailTrashPostsToTrashEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"M1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail trash M1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("trashed: M1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/messages/M1/trash") == true)
+    }
+
+    @Test func gmailUntrashPostsToUntrashEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"M1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail untrash M1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("untrashed: M1"))
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/messages/M1/untrash") == true)
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()
