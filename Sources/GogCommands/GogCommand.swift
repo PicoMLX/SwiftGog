@@ -2100,6 +2100,7 @@ struct ContactsCreate: AsyncParsableCommand {
         }
         let payload = try JSONEncoder().encode(ContactWrite(
             etag: nil,
+            metadata: nil,
             names: name.map { [ContactWrite.Name(unstructuredName: $0)] },
             emailAddresses: email.isEmpty
                 ? nil : email.map { ContactWrite.Value(value: $0) },
