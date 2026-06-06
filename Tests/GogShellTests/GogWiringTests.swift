@@ -1290,7 +1290,8 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("trashed: F1"))
         #expect(transport.lastMethod == "PATCH")
-        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1") == true)
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1") == true)
+        #expect(transport.lastURL?.absoluteString.contains("supportsAllDrives=true") == true)
         #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
             .contains(#""trashed":true"#))
     }
@@ -1401,7 +1402,7 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("copied: F2"))
         #expect(transport.lastMethod == "POST")
-        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1/copy") == true)
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1/copy") == true)
     }
 
     @Test func driveMovePatchesParentsWithExplicitFrom() async throws {
@@ -1478,7 +1479,7 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("shared: PERM1"))
         #expect(transport.lastMethod == "POST")
-        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1/permissions") == true)
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1/permissions") == true)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("\"type\":\"user\""))
         #expect(body.contains("writer") && body.contains("a@b.com"))
@@ -1516,7 +1517,7 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("revoked: P1"))
         #expect(transport.lastMethod == "DELETE")
-        #expect(transport.lastURL?.absoluteString.hasSuffix("/files/F1/permissions/P1") == true)
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1/permissions/P1") == true)
     }
 
     // MARK: - Writes: Sheets append / clear
@@ -1627,7 +1628,8 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("created: people/c1"))
         #expect(transport.lastMethod == "POST")
-        #expect(transport.lastURL?.absoluteString.hasSuffix("people:createContact") == true)
+        #expect(transport.lastURL?.absoluteString.contains("people:createContact") == true)
+        #expect(transport.lastURL?.absoluteString.contains("personFields") == true)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("Jane Doe") && body.contains("jane@x.com"))
     }
@@ -1691,6 +1693,50 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.stdout.contains("deleted: people/c1"))
         #expect(transport.lastMethod == "DELETE")
         #expect(transport.lastURL?.absoluteString.hasSuffix("people/c1:deleteContact") == true)
+    }
+
+    @Test func driveShareGroupUsesGroupType() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM3"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog drive share F1 --email team@x.com --type group")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("\"type\":\"group\""))
+    }
+
+    @Test func driveShareRejectsBadType() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive share F1 --email a@b.com --type domain")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--type must be user or group"))
+    }
+
+    @Test func driveShareEncodesFileIdAsSingleSegment() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM4"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share 'a/b' --email x@y.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        // The file id is encoded as one path segment, not split by its slash.
+        #expect(transport.lastURL?.absoluteString.contains("/files/a%2Fb/permissions") == true)
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {

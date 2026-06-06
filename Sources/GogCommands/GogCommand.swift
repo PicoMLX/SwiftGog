@@ -561,6 +561,10 @@ struct DriveAbout: AsyncParsableCommand {
     }
 }
 
+/// Drive write endpoints must opt into shared drives, mirroring the read
+/// commands (`permissions`/`revisions` already pass `supportsAllDrives`).
+private let driveSharedDrive = URLQueryItem(name: "supportsAllDrives", value: "true")
+
 /// `gog drive trash <id>` — move a file to Trash (reversible via untrash).
 struct DriveTrash: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -580,7 +584,9 @@ struct DriveTrash: AsyncParsableCommand {
             return
         }
         let payload = try JSONEncoder().encode(["trashed": true])
-        let url = try googleURL("https://www.googleapis.com/drive/v3/files", id: id)
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: id,
+            query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -609,7 +615,9 @@ struct DriveUntrash: AsyncParsableCommand {
             return
         }
         let payload = try JSONEncoder().encode(["trashed": false])
-        let url = try googleURL("https://www.googleapis.com/drive/v3/files", id: id)
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: id,
+            query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -639,7 +647,9 @@ struct DriveRename: AsyncParsableCommand {
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
             return
         }
-        let url = try googleURL("https://www.googleapis.com/drive/v3/files", id: id)
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", id: id,
+            query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -679,7 +689,8 @@ struct DriveMkdir: AsyncParsableCommand {
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
             return
         }
-        let url = URL(string: "https://www.googleapis.com/drive/v3/files")!
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -720,7 +731,8 @@ struct DriveCopy: AsyncParsableCommand {
             return
         }
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: "\(id)/copy")
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))/copy",
+            query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -760,12 +772,13 @@ struct DriveMove: AsyncParsableCommand {
         if remove == nil {
             let metaURL = try googleURL(
                 "https://www.googleapis.com/drive/v3/files", id: id,
-                query: [URLQueryItem(name: "fields", value: "parents")])
+                query: [URLQueryItem(name: "fields", value: "parents"),
+                        driveSharedDrive])
             let meta = try JSONDecoder().decode(
                 DriveParents.self, from: try await GoogleHTTPClient().get(metaURL))
             remove = (meta.parents ?? []).joined(separator: ",")
         }
-        var query = [URLQueryItem(name: "addParents", value: to)]
+        var query = [URLQueryItem(name: "addParents", value: to), driveSharedDrive]
         if let remove, !remove.isEmpty {
             query.append(URLQueryItem(name: "removeParents", value: remove))
         }
@@ -794,6 +807,8 @@ struct DriveShare: AsyncParsableCommand {
     var anyone: Bool = false
     @Option(name: .long, help: "Role: reader, writer, or commenter.")
     var role: String = "reader"
+    @Option(name: .long, help: "Grantee type for --email: user or group.")
+    var type: String = "user"
     @Flag(name: .long, help: "Build the request but do not share.")
     var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
@@ -810,6 +825,10 @@ struct DriveShare: AsyncParsableCommand {
                 "gog: drive share needs exactly one of --email <addr> or --anyone\n")
             throw ExitCode(2)
         }
+        guard anyone || ["user", "group"].contains(type) else {
+            Shell.bashCurrent.stderr("gog: --type must be user or group\n")
+            throw ExitCode(2)
+        }
         struct PermissionBody: Encodable {
             let type: String
             let role: String
@@ -817,7 +836,7 @@ struct DriveShare: AsyncParsableCommand {
         }
         let body = anyone
             ? PermissionBody(type: "anyone", role: role, emailAddress: nil)
-            : PermissionBody(type: "user", role: role, emailAddress: email)
+            : PermissionBody(type: type, role: role, emailAddress: email)
         let payload = try JSONEncoder().encode(body)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not sharing\n")
@@ -825,7 +844,8 @@ struct DriveShare: AsyncParsableCommand {
             return
         }
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: "\(id)/permissions")
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))/permissions",
+            query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -856,8 +876,9 @@ struct DriveUnshare: AsyncParsableCommand {
             return
         }
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files",
-            id: "\(id)/permissions/\(permission)")
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))"
+                + "/permissions/\(pathSegment(permission))",
+            query: [driveSharedDrive])
         _ = try await GoogleHTTPClient().delete(url)
         Shell.bashCurrent.stdout("revoked: \(permission)\n")
     }
@@ -2076,8 +2097,10 @@ struct ContactsCreate: AsyncParsableCommand {
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
             return
         }
-        let url = URL(string:
-            "https://people.googleapis.com/v1/people:createContact")!
+        let url = try googleURL(
+            "https://people.googleapis.com/v1/people:createContact",
+            query: [URLQueryItem(name: "personFields",
+                                 value: "names,emailAddresses,phoneNumbers")])
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
