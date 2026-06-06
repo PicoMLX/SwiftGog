@@ -1645,11 +1645,12 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
     @Test func contactsUpdateReadsEtagThenPatches() async throws {
         let shell = Shell()
         shell.registerGogCommands()
-        // The GET (etag lookup) and the PATCH both see this response; the GET
-        // decode supplies the etag the PATCH body must carry.
+        // Both the GET (etag + metadata.sources lookup) and the PATCH see this
+        // response; the GET decode supplies the etag and source metadata the
+        // PATCH body must echo back — updateContact 400s without them.
         let transport = RecordingTransport(
-            response: HTTPResponse(status: 200,
-                body: Data(#"{"resourceName":"people/c1","etag":"ETAG1"}"#.utf8)))
+            response: HTTPResponse(status: 200, body: Data(
+                #"{"resourceName":"people/c1","etag":"ETAG1","metadata":{"sources":[{"type":"CONTACT","id":"src1","etag":"SRCE"}]}}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
@@ -1660,12 +1661,16 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         }
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("updated: people/c1"))
-        #expect(transport.urls.count == 2)            // etag lookup, then patch
+        #expect(transport.urls.count == 2)            // get (etag+metadata), then patch
         #expect(transport.lastMethod == "PATCH")
+        // The read mask asks for metadata so the sources come back.
+        #expect(transport.urls.first?.absoluteString.contains("metadata") == true)
         let url = transport.lastURL?.absoluteString ?? ""
         #expect(url.contains(":updateContact") && url.contains("updatePersonFields=names"))
+        // The PATCH body echoes etag + metadata.sources and the new name.
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("ETAG1") && body.contains("Jane R"))
+        #expect(body.contains("sources") && body.contains("SRCE"))
     }
 
     @Test func contactsDeleteDryRunDoesNotDelete() async throws {

@@ -2051,18 +2051,31 @@ private struct Contact: Decodable {
     let emailAddresses: [Email]?
 }
 
-/// The writable subset of a People `Person` — `names`/`emails`/`phones` plus the
-/// `etag` that `updateContact` requires. Optionals are omitted when nil, so the
-/// same type serves create (no etag) and update (etag + only changed fields).
+/// The writable subset of a People `Person`. `updateContact` rejects a write
+/// that doesn't echo back the contact's current `etag` *and* `metadata.sources`
+/// (mirrors gogcli, which reads the person then sends it straight back), so both
+/// ride along; all optionals are omitted when nil, so the same type serves
+/// create (neither) and update (both + only the changed fields).
 private struct ContactWrite: Encodable {
     struct Name: Encodable { let unstructuredName: String }
     struct Value: Encodable { let value: String }
     let etag: String?
+    let metadata: ContactMetadata?
     let names: [Name]?
     let emailAddresses: [Value]?
     let phoneNumbers: [Value]?
 }
-private struct ContactEtag: Decodable { let etag: String? }
+
+/// A contact's source metadata: read from `people.get` and echoed back on
+/// `updateContact` (the API 400s without it). `Codable` so it round-trips.
+private struct ContactMetadata: Codable {
+    struct Source: Codable { let type: String?; let id: String?; let etag: String? }
+    let sources: [Source]?
+}
+private struct ContactReadback: Decodable {
+    let etag: String?
+    let metadata: ContactMetadata?
+}
 
 /// `gog contacts create --name … [--email …] [--phone …]` — create a contact.
 struct ContactsCreate: AsyncParsableCommand {
@@ -2112,8 +2125,9 @@ struct ContactsCreate: AsyncParsableCommand {
 }
 
 /// `gog contacts update <resourceName> …` — replace a contact's name/emails/
-/// phones. People's `updateContact` requires the current etag, so we read it
-/// first, then PATCH only the fields named on the command line.
+/// phones. People's `updateContact` requires the current etag *and*
+/// metadata.sources, so we read the person first, then PATCH it back with only
+/// the fields named on the command line.
 struct ContactsUpdate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "update",
@@ -2147,15 +2161,19 @@ struct ContactsUpdate: AsyncParsableCommand {
                 "would update \(resourceName): \(fields.joined(separator: ","))\n")
             return
         }
-        // updateContact rejects writes without the person's current etag.
+        // updateContact rejects a write that doesn't carry the contact's current
+        // etag AND metadata.sources, so read both (like gogcli's read-modify-
+        // write) and send them back with only the changed fields.
         let getURL = try googleURL(
             "https://people.googleapis.com/v1", id: resourceName,
-            query: [URLQueryItem(name: "personFields",
-                                 value: fields.joined(separator: ","))])
-        let etag = try JSONDecoder().decode(
-            ContactEtag.self, from: try await GoogleHTTPClient().get(getURL)).etag
+            query: [URLQueryItem(
+                name: "personFields",
+                value: fields.joined(separator: ",") + ",metadata")])
+        let current = try JSONDecoder().decode(
+            ContactReadback.self, from: try await GoogleHTTPClient().get(getURL))
         let payload = try JSONEncoder().encode(ContactWrite(
-            etag: etag,
+            etag: current.etag,
+            metadata: current.metadata,
             names: name.map { [ContactWrite.Name(unstructuredName: $0)] },
             emailAddresses: email.isEmpty
                 ? nil : email.map { ContactWrite.Value(value: $0) },
