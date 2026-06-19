@@ -2057,7 +2057,7 @@ private struct Contact: Decodable {
 /// ride along; all optionals are omitted when nil, so the same type serves
 /// create (neither) and update (both + only the changed fields).
 private struct ContactWrite: Encodable {
-    struct Name: Encodable { let unstructuredName: String }
+    struct Name: Encodable { let givenName: String?; let familyName: String? }
     struct Value: Encodable { let value: String }
     let etag: String?
     let metadata: ContactMetadata?
@@ -2073,17 +2073,21 @@ private struct ContactMetadata: Codable {
     let sources: [Source]?
 }
 private struct ContactReadback: Decodable {
+    struct Name: Decodable { let givenName: String?; let familyName: String? }
     let etag: String?
     let metadata: ContactMetadata?
+    let names: [Name]?
 }
 
-/// `gog contacts create --name … [--email …] [--phone …]` — create a contact.
+/// `gog contacts create --given … [--family …] [--email …] [--phone …]` — create
+/// a contact. Names are structured (given/family), matching gogcli.
 struct ContactsCreate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
         abstract: "Create a contact (--dry-run to preview).")
 
-    @Option(name: .long, help: "Full name.") var name: String?
+    @Option(name: .long, help: "Given (first) name. Required.") var given: String?
+    @Option(name: .long, help: "Family (last) name.") var family: String?
     @Option(name: .long, help: "Email address (repeatable).") var email: [String] = []
     @Option(name: .long, help: "Phone number (repeatable).") var phone: [String] = []
     @Flag(name: .long, help: "Build the request but do not create.")
@@ -2092,16 +2096,17 @@ struct ContactsCreate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
-        guard name != nil || !email.isEmpty || !phone.isEmpty else {
-            Shell.bashCurrent.stderr(
-                "gog: contacts create needs at least one of "
-                    + "--name, --email, --phone\n")
+        let givenName = (given ?? "").trimmingCharacters(in: .whitespaces)
+        guard !givenName.isEmpty else {
+            Shell.bashCurrent.stderr("gog: contacts create requires --given\n")
             throw ExitCode(2)
         }
         let payload = try JSONEncoder().encode(ContactWrite(
             etag: nil,
             metadata: nil,
-            names: name.map { [ContactWrite.Name(unstructuredName: $0)] },
+            names: [ContactWrite.Name(
+                givenName: givenName,
+                familyName: family?.trimmingCharacters(in: .whitespaces))],
             emailAddresses: email.isEmpty
                 ? nil : email.map { ContactWrite.Value(value: $0) },
             phoneNumbers: phone.isEmpty
@@ -2111,10 +2116,9 @@ struct ContactsCreate: AsyncParsableCommand {
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
             return
         }
-        let url = try googleURL(
-            "https://people.googleapis.com/v1/people:createContact",
-            query: [URLQueryItem(name: "personFields",
-                                 value: "names,emailAddresses,phoneNumbers")])
+        // createContact takes no personFields (gogcli omits it; it isn't required).
+        let url = URL(string:
+            "https://people.googleapis.com/v1/people:createContact")!
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -2136,7 +2140,8 @@ struct ContactsUpdate: AsyncParsableCommand {
 
     @Argument(help: "Contact resource name, e.g. people/c123.")
     var resourceName: String
-    @Option(name: .long, help: "New full name.") var name: String?
+    @Option(name: .long, help: "New given (first) name.") var given: String?
+    @Option(name: .long, help: "New family (last) name.") var family: String?
     @Option(name: .long, help: "Replace emails (repeatable).") var email: [String] = []
     @Option(name: .long, help: "Replace phone numbers (repeatable).")
     var phone: [String] = []
@@ -2146,14 +2151,15 @@ struct ContactsUpdate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        let updatingName = given != nil || family != nil
         var fields: [String] = []
-        if name != nil { fields.append("names") }
+        if updatingName { fields.append("names") }
         if !email.isEmpty { fields.append("emailAddresses") }
         if !phone.isEmpty { fields.append("phoneNumbers") }
         guard !fields.isEmpty else {
             Shell.bashCurrent.stderr(
                 "gog: contacts update needs at least one of "
-                    + "--name, --email, --phone\n")
+                    + "--given, --family, --email, --phone\n")
             throw ExitCode(2)
         }
         if dryRun {
@@ -2172,10 +2178,20 @@ struct ContactsUpdate: AsyncParsableCommand {
                 value: fields.joined(separator: ",") + ",metadata")])
         let current = try JSONDecoder().decode(
             ContactReadback.self, from: try await GoogleHTTPClient().get(getURL))
+        // Override only the provided name part, preserving the other (gogcli).
+        let names: [ContactWrite.Name]?
+        if updatingName {
+            let cur = current.names?.first
+            names = [ContactWrite.Name(
+                givenName: given?.trimmingCharacters(in: .whitespaces) ?? cur?.givenName,
+                familyName: family?.trimmingCharacters(in: .whitespaces) ?? cur?.familyName)]
+        } else {
+            names = nil
+        }
         let payload = try JSONEncoder().encode(ContactWrite(
             etag: current.etag,
             metadata: current.metadata,
-            names: name.map { [ContactWrite.Name(unstructuredName: $0)] },
+            names: names,
             emailAddresses: email.isEmpty
                 ? nil : email.map { ContactWrite.Value(value: $0) },
             phoneNumbers: phone.isEmpty

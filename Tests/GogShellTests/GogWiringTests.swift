@@ -1598,17 +1598,18 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         shell.registerGogCommands()
         let run = try await shell.runCapturing("gog contacts create")
         #expect(run.exitStatus == ExitStatus(2))
-        #expect(run.stderr.contains("--name, --email, --phone"))
+        #expect(run.stderr.contains("requires --given"))
     }
 
     @Test func contactsCreateDryRunDoesNotWrite() async throws {
         let shell = Shell()
         shell.registerGogCommands()
         let run = try await shell.runCapturing(
-            "gog contacts create --name 'Jane Doe' --dry-run")
+            "gog contacts create --given Jane --family Doe --dry-run")
         #expect(run.exitStatus == .success)
         #expect(run.stderr.contains("dry-run: not creating"))
-        #expect(run.stdout.contains("unstructuredName") && run.stdout.contains("Jane Doe"))
+        #expect(run.stdout.contains("givenName") && run.stdout.contains("Jane"))
+        #expect(run.stdout.contains("familyName") && run.stdout.contains("Doe"))
     }
 
     @Test func contactsCreatePostsToCreateContact() async throws {
@@ -1622,16 +1623,18 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
                 StubProvider(token: "t", accountHint: nil)
             ) {
                 try await shell.runCapturing(
-                    "gog contacts create --name 'Jane Doe' --email jane@x.com")
+                    "gog contacts create --given Jane --family Doe --email jane@x.com")
             }
         }
         #expect(run.exitStatus == .success)
         #expect(run.stdout.contains("created: people/c1"))
         #expect(transport.lastMethod == "POST")
-        #expect(transport.lastURL?.absoluteString.contains("people:createContact") == true)
-        #expect(transport.lastURL?.absoluteString.contains("personFields") == true)
+        // create takes no personFields query (matches gogcli).
+        #expect(transport.lastURL?.absoluteString.hasSuffix("people:createContact") == true)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
-        #expect(body.contains("Jane Doe") && body.contains("jane@x.com"))
+        #expect(body.contains("givenName") && body.contains("Jane"))
+        #expect(body.contains("familyName") && body.contains("Doe"))
+        #expect(body.contains("jane@x.com"))
     }
 
     @Test func contactsUpdateRequiresAField() async throws {
@@ -1639,7 +1642,7 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         shell.registerGogCommands()
         let run = try await shell.runCapturing("gog contacts update people/c1")
         #expect(run.exitStatus == ExitStatus(2))
-        #expect(run.stderr.contains("--name, --email, --phone"))
+        #expect(run.stderr.contains("--given, --family, --email, --phone"))
     }
 
     @Test func contactsUpdateReadsEtagThenPatches() async throws {
@@ -1650,13 +1653,13 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         // PATCH body must echo back — updateContact 400s without them.
         let transport = RecordingTransport(
             response: HTTPResponse(status: 200, body: Data(
-                #"{"resourceName":"people/c1","etag":"ETAG1","metadata":{"sources":[{"type":"CONTACT","id":"src1","etag":"SRCE"}]}}"#.utf8)))
+                #"{"resourceName":"people/c1","etag":"ETAG1","names":[{"givenName":"Old","familyName":"Doe"}],"metadata":{"sources":[{"type":"CONTACT","id":"src1","etag":"SRCE"}]}}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
             ) {
                 try await shell.runCapturing(
-                    "gog contacts update people/c1 --name 'Jane R'")
+                    "gog contacts update people/c1 --given Jane")
             }
         }
         #expect(run.exitStatus == .success)
@@ -1667,9 +1670,11 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(transport.urls.first?.absoluteString.contains("metadata") == true)
         let url = transport.lastURL?.absoluteString ?? ""
         #expect(url.contains(":updateContact") && url.contains("updatePersonFields=names"))
-        // The PATCH body echoes etag + metadata.sources and the new name.
+        // The PATCH body echoes etag + metadata.sources, sets the new given name,
+        // and preserves the family name that wasn't passed.
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
-        #expect(body.contains("ETAG1") && body.contains("Jane R"))
+        #expect(body.contains("ETAG1") && body.contains("\"givenName\":\"Jane\""))
+        #expect(body.contains("\"familyName\":\"Doe\""))
         #expect(body.contains("sources") && body.contains("SRCE"))
     }
 
