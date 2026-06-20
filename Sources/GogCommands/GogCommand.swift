@@ -789,18 +789,24 @@ struct DriveMove: AsyncParsableCommand {
             Shell.bashCurrent.stdout("would move: \(id) -> \(to)\n")
             return
         }
-        var remove = from
-        if remove == nil {
+        let removeCandidates: [String]
+        if let from {
+            removeCandidates = [from]
+        } else {
             let metaURL = try googleURL(
                 "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
                 query: [URLQueryItem(name: "fields", value: "parents"),
                         driveSharedDrive])
             let meta = try JSONDecoder().decode(
                 DriveParents.self, from: try await GoogleHTTPClient().get(metaURL))
-            remove = (meta.parents ?? []).joined(separator: ",")
+            removeCandidates = meta.parents ?? []
         }
+        // Never remove the parent we're adding: an omitted --from on a file
+        // already under `to` would otherwise send addParents=to & removeParents=to,
+        // an ambiguous parent mutation Drive can reject.
+        let remove = removeCandidates.filter { $0 != to }.joined(separator: ",")
         var query = [URLQueryItem(name: "addParents", value: to), driveSharedDrive]
-        if let remove, !remove.isEmpty {
+        if !remove.isEmpty {
             query.append(URLQueryItem(name: "removeParents", value: remove))
         }
         let url = try googleURL(

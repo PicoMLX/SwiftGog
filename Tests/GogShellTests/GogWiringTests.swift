@@ -1488,6 +1488,26 @@ extension Trait where Self == WriteTierTrait {
         #expect(url.contains("addParents=NEW") && url.contains("removeParents=OLD"))
     }
 
+    @Test func driveMoveDropsDestinationFromRemovedParents() async throws {
+        // File already under NEW: must not send removeParents=NEW alongside
+        // addParents=NEW (an ambiguous parent mutation Drive can reject).
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"parents":["NEW"]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mv F1 --to NEW")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("addParents=NEW"))
+        #expect(!url.contains("removeParents"))
+    }
+
     @Test func driveShareRequiresEmailOrAnyone() async throws {
         let shell = Shell()
         shell.registerGogCommands()
