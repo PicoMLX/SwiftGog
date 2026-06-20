@@ -69,6 +69,20 @@ private func googleURL(_ base: String, id: String? = nil,
     return url
 }
 
+/// Host-policy gate for write commands: the tier the host granted
+/// (`GogPolicies.current.writeTier`) must be at least `required`, else exit 3.
+/// Read from the task-local policy only — never a flag or environment variable —
+/// so LLM-authored bash can't escalate its own access.
+private func requireWriteTier(_ required: GogWriteTier) throws {
+    let granted = GogPolicies.current.writeTier
+    if granted < required {
+        Shell.bashCurrent.stderr(
+            "gog: this command needs write tier '\(required)', but host policy "
+                + "grants '\(granted)' (read-only by default)\n")
+        throw ExitCode(3)
+    }
+}
+
 /// Percent-encode a value that is a *single* path segment (an id, a user/group
 /// key, a Sheets range): unlike `.urlPathAllowed` it also escapes "/" so a
 /// stray separator becomes %2F instead of restructuring the request path.
@@ -578,6 +592,7 @@ struct DriveTrash: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not trashing\n")
             Shell.bashCurrent.stdout("would trash: \(id)\n")
@@ -609,6 +624,7 @@ struct DriveUntrash: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not untrashing\n")
             Shell.bashCurrent.stdout("would untrash: \(id)\n")
@@ -641,6 +657,7 @@ struct DriveRename: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let payload = try JSONEncoder().encode(["name": name])
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not renaming\n")
@@ -675,6 +692,7 @@ struct DriveMkdir: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         struct NewFolder: Encodable {
             let name: String
             let mimeType: String
@@ -719,6 +737,7 @@ struct DriveCopy: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         struct CopyBody: Encodable {
             let name: String?
             let parents: [String]?
@@ -763,6 +782,7 @@ struct DriveMove: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not moving\n")
             Shell.bashCurrent.stdout("would move: \(id) -> \(to)\n")
@@ -815,6 +835,7 @@ struct DriveShare: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         guard ["reader", "writer", "commenter"].contains(role) else {
             Shell.bashCurrent.stderr(
                 "gog: --role must be reader, writer, or commenter\n")
@@ -870,6 +891,7 @@ struct DriveUnshare: AsyncParsableCommand {
     var dryRun: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not revoking\n")
             Shell.bashCurrent.stdout("would revoke: \(permission) on \(id)\n")
@@ -1401,6 +1423,7 @@ struct GmailModify: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         guard !addLabel.isEmpty || !removeLabel.isEmpty else {
             Shell.bashCurrent.stderr(
                 "gog: gmail modify needs at least one --add-label or "
@@ -1441,6 +1464,7 @@ struct GmailTrash: AsyncParsableCommand {
     var dryRun: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not trashing\n")
             Shell.bashCurrent.stdout("would trash: \(id)\n")
@@ -1465,6 +1489,7 @@ struct GmailUntrash: AsyncParsableCommand {
     var dryRun: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not untrashing\n")
             Shell.bashCurrent.stdout("would untrash: \(id)\n")
@@ -1701,6 +1726,7 @@ struct CalendarUpdate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         struct EventPatch: Encodable {
             struct When: Encodable { let dateTime: String }
             let summary: String?
@@ -1748,6 +1774,7 @@ struct CalendarDelete: AsyncParsableCommand {
     var dryRun: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not deleting\n")
             Shell.bashCurrent.stdout("would delete: \(id)\n")
@@ -2096,6 +2123,7 @@ struct ContactsCreate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let givenName = (given ?? "").trimmingCharacters(in: .whitespaces)
         guard !givenName.isEmpty else {
             Shell.bashCurrent.stderr("gog: contacts create requires --given\n")
@@ -2151,6 +2179,7 @@ struct ContactsUpdate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let updatingName = given != nil || family != nil
         var fields: [String] = []
         if updatingName { fields.append("names") }
@@ -2224,6 +2253,7 @@ struct ContactsDelete: AsyncParsableCommand {
     var dryRun: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not deleting\n")
             Shell.bashCurrent.stdout("would delete: \(resourceName)\n")
@@ -2489,6 +2519,7 @@ struct TasksComplete: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         // Setting status=completed; Google fills in the `completed` timestamp.
         let payload = try JSONEncoder().encode(["status": "completed"])
         if dryRun {
@@ -2523,6 +2554,7 @@ struct TasksDelete: AsyncParsableCommand {
     var dryRun: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not deleting\n")
             Shell.bashCurrent.stdout("would delete: \(task)\n")
@@ -2780,6 +2812,7 @@ struct SheetsAppend: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         guard let valuesData = valuesJson.data(using: .utf8),
               let values = try? JSONDecoder().decode([[CellValue]].self, from: valuesData)
         else {
@@ -2828,6 +2861,7 @@ struct SheetsClear: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not clearing\n")
             Shell.bashCurrent.stdout("would clear: \(range)\n")
