@@ -348,7 +348,7 @@ struct DriveGet: AsyncParsableCommand {
 
     func run() async throws {
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id,
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
             query: [URLQueryItem(
                 name: "fields", value: "id,name,mimeType,modifiedTime,size,parents")])
         let body = try await GoogleHTTPClient().get(url)
@@ -422,7 +422,7 @@ struct DriveDownload: AsyncParsableCommand {
         // download, so an out-of-mount path fails closed without a fetch.
         try await ensureWritableDestination(resolved, label: out)
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id,
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
             query: [URLQueryItem(name: "alt", value: "media")])
         // Write the destination only after a successful fetch.
         let data = try await GoogleHTTPClient().get(url)
@@ -600,7 +600,7 @@ struct DriveTrash: AsyncParsableCommand {
         }
         let payload = try JSONEncoder().encode(["trashed": true])
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id,
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
             query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
         if json {
@@ -632,7 +632,7 @@ struct DriveUntrash: AsyncParsableCommand {
         }
         let payload = try JSONEncoder().encode(["trashed": false])
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id,
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
             query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
         if json {
@@ -665,7 +665,7 @@ struct DriveRename: AsyncParsableCommand {
             return
         }
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id,
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
             query: [driveSharedDrive])
         let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
         if json {
@@ -791,7 +791,7 @@ struct DriveMove: AsyncParsableCommand {
         var remove = from
         if remove == nil {
             let metaURL = try googleURL(
-                "https://www.googleapis.com/drive/v3/files", id: id,
+                "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
                 query: [URLQueryItem(name: "fields", value: "parents"),
                         driveSharedDrive])
             let meta = try JSONDecoder().decode(
@@ -803,7 +803,7 @@ struct DriveMove: AsyncParsableCommand {
             query.append(URLQueryItem(name: "removeParents", value: remove))
         }
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id, query: query)
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))", query: query)
         let result = try await GoogleHTTPClient().patch(url, jsonBody: Data("{}".utf8))
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
