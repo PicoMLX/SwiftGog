@@ -13,7 +13,8 @@ public struct GogPolicy: Sendable {
     public var adminWriteDisabled: Bool
     /// The capability tier the host grants the **data-mutation** commands —
     /// everything that creates, edits, or deletes Google data (Calendar, Tasks,
-    /// Gmail labels/trash, Drive, Sheets, Contacts). Defaults to `.readOnly`, so
+    /// Gmail labels/trash/drafts, Drive, Sheets, Contacts). Defaults to
+    /// `.readOnly`, so
     /// those commands refuse (exit 3) until the host raises it to `.edit`
     /// (additive / in-place / reversible — create, add, append, mkdir, cp,
     /// rename, update, label changes, untrash) or `.full` (also destructive /

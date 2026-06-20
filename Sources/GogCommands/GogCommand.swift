@@ -1207,6 +1207,7 @@ struct GmailDraft: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let mimeData = try plainTextMIME(to: to, subject: subject, body: body)
         let payload = try JSONEncoder().encode(
             ["message": ["raw": mimeData.base64URLEncodedString()]])
