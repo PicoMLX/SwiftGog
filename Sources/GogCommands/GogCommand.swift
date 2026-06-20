@@ -2268,7 +2268,11 @@ struct ContactsUpdate: AsyncParsableCommand {
             "https://people.googleapis.com/v1", id: resourceName,
             query: [URLQueryItem(
                 name: "personFields",
-                value: fields.joined(separator: ",") + ",metadata")])
+                value: fields.joined(separator: ",") + ",metadata"),
+                // Read only the contact's own data: a contact linked to a Google
+                // profile otherwise returns the PROFILE name too (often first),
+                // which the names.first merge below would graft onto the contact.
+                URLQueryItem(name: "sources", value: "READ_SOURCE_TYPE_CONTACT")])
         let current = try JSONDecoder().decode(
             ContactReadback.self, from: try await GoogleHTTPClient().get(getURL))
         // Override only the provided name part, preserving the other (gogcli).

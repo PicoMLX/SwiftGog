@@ -1919,6 +1919,10 @@ extension Trait where Self == WriteTierTrait {
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("Joey"))                 // requested change applied
         #expect(body.contains(#""middleName":"Q""#))   // unedited component kept
+        // The read is restricted to the contact's own source (not a linked
+        // profile), so the preserved base name is the contact's.
+        #expect(transport.urls.first?.absoluteString.contains("READ_SOURCE_TYPE_CONTACT")
+            == true)
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {
