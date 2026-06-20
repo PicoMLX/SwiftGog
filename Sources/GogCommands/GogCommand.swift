@@ -255,6 +255,7 @@ struct DriveUpload: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let resolved = Shell.bashCurrent.resolvePath(path)
         let data: Data
         do {
@@ -1473,7 +1474,7 @@ struct GmailTrash: AsyncParsableCommand {
         let url = try googleURL(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             id: "\(id)/trash")
-        _ = try await GoogleHTTPClient().post(url, jsonBody: Data("{}".utf8))
+        _ = try await GoogleHTTPClient().post(url)
         Shell.bashCurrent.stdout("trashed: \(id)\n")
     }
 }
@@ -1498,7 +1499,7 @@ struct GmailUntrash: AsyncParsableCommand {
         let url = try googleURL(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             id: "\(id)/untrash")
-        _ = try await GoogleHTTPClient().post(url, jsonBody: Data("{}".utf8))
+        _ = try await GoogleHTTPClient().post(url)
         Shell.bashCurrent.stdout("untrashed: \(id)\n")
     }
 }
@@ -1685,6 +1686,7 @@ struct CalendarCreate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         struct NewEvent: Encodable {
             struct When: Encodable { let dateTime: String }
             let summary: String
@@ -2490,6 +2492,7 @@ struct TasksAdd: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let payload = try JSONEncoder().encode(["title": title])
         let url = try googleURL(
             "https://tasks.googleapis.com/tasks/v1/lists", id: "\(list)/tasks")
@@ -2768,6 +2771,7 @@ struct SheetsUpdate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         guard let valuesData = valuesJson.data(using: .utf8),
               let values = try? JSONDecoder().decode([[CellValue]].self, from: valuesData)
         else {
