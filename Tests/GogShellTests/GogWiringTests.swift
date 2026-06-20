@@ -42,10 +42,38 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
     }
 }
 
+/// Binds a host `GogWriteTier` around each test in the suite, so the gated write
+/// commands execute under test without per-test policy plumbing. Tests that
+/// verify the gate itself re-bind a lower tier inline (the inner bind wins).
+struct WriteTierTrait: SuiteTrait, TestTrait {
+    let tier: GogWriteTier
+    func scopeProvider(for test: Test, testCase: Test.Case?) -> Scope? {
+        Scope(tier: tier)
+    }
+    struct Scope: TestScoping {
+        let tier: GogWriteTier
+        func provideScope(
+            for test: Test, testCase: Test.Case?,
+            performing function: @Sendable () async throws -> Void
+        ) async throws {
+            try await GogPolicies.$current.withValue(GogPolicy(writeTier: tier)) {
+                try await function()
+            }
+        }
+    }
+}
+
+extension Trait where Self == WriteTierTrait {
+    /// Bind a host write tier for the annotated suite/test.
+    static func writeTier(_ tier: GogWriteTier) -> Self { WriteTierTrait(tier: tier) }
+}
+
 /// Wiring + behaviour tests: `gog` registered into a sandboxed `Shell` and run
 /// through `runCapturing`. Covers the fail-closed sandbox contracts (deny
 /// paths) and command happy paths via an injected fake `GogTransport`.
-@Suite struct GogWiringTests {
+/// Runs at the `.full` write tier so the gated write commands execute; the
+/// dedicated gate tests re-bind a lower tier inline to prove the gate blocks.
+@Suite(.writeTier(.full)) struct GogWiringTests {
 
     @Test func versionRunsThroughTheShell() async throws {
         let shell = Shell()
@@ -1065,7 +1093,9 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         // PATCH with nothing to change is a no-op mistake — reject pre-network.
         let shell = Shell()
         shell.registerGogCommands()
-        let run = try await shell.runCapturing("gog calendar update E1")
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog calendar update E1")
+        }
         #expect(run.exitStatus == ExitStatus(2))
         #expect(run.stderr.contains("at least one of"))
     }
@@ -1074,8 +1104,10 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         // Validation + payload build precede any network, so no transport needed.
         let shell = Shell()
         shell.registerGogCommands()
-        let run = try await shell.runCapturing(
-            "gog calendar update E1 --summary Renamed --dry-run")
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing(
+                "gog calendar update E1 --summary Renamed --dry-run")
+        }
         #expect(run.exitStatus == .success)
         #expect(run.stderr.contains("dry-run: not updating"))
         #expect(run.stdout.contains("Renamed"))
@@ -1087,11 +1119,13 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         let transport = RecordingTransport(
             response: HTTPResponse(status: 200,
                 body: Data(#"{"id":"E1","summary":"Renamed"}"#.utf8)))
-        let run = try await GogTransportProvider.$current.withValue(transport) {
-            try await GogCredentials.$current.withValue(
-                StubProvider(token: "t", accountHint: nil)
-            ) {
-                try await shell.runCapturing("gog calendar update E1 --summary Renamed")
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog calendar update E1 --summary Renamed")
+                }
             }
         }
         #expect(run.exitStatus == .success)
@@ -1103,7 +1137,9 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
     @Test func calendarDeleteDryRunDoesNotDelete() async throws {
         let shell = Shell()
         shell.registerGogCommands()
-        let run = try await shell.runCapturing("gog calendar delete E1 --dry-run")
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .full)) {
+            try await shell.runCapturing("gog calendar delete E1 --dry-run")
+        }
         #expect(run.exitStatus == .success)
         #expect(run.stderr.contains("dry-run: not deleting"))
         #expect(run.stdout.contains("would delete: E1"))
@@ -1114,11 +1150,13 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         shell.registerGogCommands()
         let transport = RecordingTransport(
             response: HTTPResponse(status: 204, body: Data()))
-        let run = try await GogTransportProvider.$current.withValue(transport) {
-            try await GogCredentials.$current.withValue(
-                StubProvider(token: "t", accountHint: nil)
-            ) {
-                try await shell.runCapturing("gog calendar delete E1")
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .full)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog calendar delete E1")
+                }
             }
         }
         #expect(run.exitStatus == .success)
@@ -1132,7 +1170,9 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
     @Test func tasksCompleteDryRunDoesNotWrite() async throws {
         let shell = Shell()
         shell.registerGogCommands()
-        let run = try await shell.runCapturing("gog tasks complete T1 --dry-run")
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog tasks complete T1 --dry-run")
+        }
         #expect(run.exitStatus == .success)
         #expect(run.stderr.contains("dry-run: not completing"))
         #expect(run.stdout.contains("would complete: T1"))
@@ -1144,11 +1184,13 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         let transport = RecordingTransport(
             response: HTTPResponse(status: 200,
                 body: Data(#"{"id":"T1","status":"completed"}"#.utf8)))
-        let run = try await GogTransportProvider.$current.withValue(transport) {
-            try await GogCredentials.$current.withValue(
-                StubProvider(token: "t", accountHint: nil)
-            ) {
-                try await shell.runCapturing("gog tasks complete T1")
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog tasks complete T1")
+                }
             }
         }
         #expect(run.exitStatus == .success)
@@ -1747,6 +1789,49 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         #expect(run.exitStatus == .success)
         // The file id is encoded as one path segment, not split by its slash.
         #expect(transport.lastURL?.absoluteString.contains("/files/a%2Fb/permissions") == true)
+    }
+
+    // MARK: - Write-tier gate (host-only policy)
+
+    @Test func readOnlyTierBlocksAnyWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Re-bind read-only, overriding the suite's .full.
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(writeTier: .readOnly)
+        ) { try await shell.runCapturing("gog tasks complete T1") }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("read-only by default"))
+    }
+
+    @Test func editTierBlocksDestructiveWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // .edit is not enough for a .full (destructive) op like drive trash.
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(writeTier: .edit)
+        ) { try await shell.runCapturing("gog drive trash F1") }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
+    }
+
+    @Test func editTierAllowsAdditiveWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"T1","status":"completed"}"#.utf8)))
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog tasks complete T1")
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("completed: T1"))
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {
