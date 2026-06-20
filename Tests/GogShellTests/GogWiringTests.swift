@@ -1854,6 +1854,73 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stdout.contains("completed: T1"))
     }
 
+    @Test func gmailModifyTrashLabelNeedsFullTier() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Adding TRASH is destructive (like `gmail trash`): .edit must refuse.
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog gmail modify M1 --add-label TRASH")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
+    }
+
+    @Test func driveShareDefaultsToNoNotificationEmail() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"P1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share F1 --email a@b.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastURL?.absoluteString.contains("sendNotificationEmail=false")
+            == true)
+    }
+
+    @Test func driveShareNotifyEnablesNotificationEmail() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"P1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share F1 --email a@b.com --notify")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastURL?.absoluteString.contains("sendNotificationEmail=true")
+            == true)
+    }
+
+    @Test func contactsUpdatePreservesUneditedNameComponents() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Readback has a middle name; updating only --given must keep it (the
+        // People API replaces the whole `names` field).
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(
+                #"{"etag":"e","names":[{"givenName":"Jo","familyName":"Lee","middleName":"Q"}]}"#
+                    .utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts update people/c1 --given Joey")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("Joey"))                 // requested change applied
+        #expect(body.contains(#""middleName":"Q""#))   // unedited component kept
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()

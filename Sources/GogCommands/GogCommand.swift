@@ -836,6 +836,8 @@ struct DriveShare: AsyncParsableCommand {
     var role: String = "reader"
     @Option(name: .long, help: "Grantee type for --email: user or group.")
     var type: String = "user"
+    @Flag(name: .long, help: "Email the grantee a share notification (off by default).")
+    var notify: Bool = false
     @Flag(name: .long, help: "Build the request but do not share.")
     var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
@@ -871,9 +873,16 @@ struct DriveShare: AsyncParsableCommand {
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
             return
         }
+        var query = [driveSharedDrive]
+        if !anyone {
+            // A share notification is an outbound email; don't send it unless
+            // asked, so it can't bypass a host that disabled Gmail/Chat sending.
+            query.append(URLQueryItem(
+                name: "sendNotificationEmail", value: notify ? "true" : "false"))
+        }
         let url = try googleURL(
             "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))/permissions",
-            query: [driveSharedDrive])
+            query: query)
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
@@ -1437,6 +1446,11 @@ struct GmailModify: AsyncParsableCommand {
                 "gog: gmail modify needs at least one --add-label or "
                     + "--remove-label (label IDs from `gog gmail labels`)\n")
             throw ExitCode(2)
+        }
+        // Adding TRASH or SPAM is destructive (equivalent to `gmail trash`), so
+        // require the .full tier even though ordinary label edits are .edit.
+        if addLabel.contains(where: { ["TRASH", "SPAM"].contains($0.uppercased()) }) {
+            try requireWriteTier(.full)
         }
         struct ModifyBody: Encodable {
             let addLabelIds: [String]
@@ -2093,7 +2107,37 @@ private struct Contact: Decodable {
 /// ride along; all optionals are omitted when nil, so the same type serves
 /// create (neither) and update (both + only the changed fields).
 private struct ContactWrite: Encodable {
-    struct Name: Encodable { let givenName: String?; let familyName: String? }
+    struct Name: Encodable {
+        let givenName: String?
+        let familyName: String?
+        let middleName: String?
+        let honorificPrefix: String?
+        let honorificSuffix: String?
+        let phoneticGivenName: String?
+        let phoneticMiddleName: String?
+        let phoneticFamilyName: String?
+        let phoneticHonorificPrefix: String?
+        let phoneticHonorificSuffix: String?
+        // Defaults so `create` (given/family only) stays a two-arg call while
+        // `update` can carry forward every component it read back.
+        init(givenName: String?, familyName: String?,
+             middleName: String? = nil, honorificPrefix: String? = nil,
+             honorificSuffix: String? = nil, phoneticGivenName: String? = nil,
+             phoneticMiddleName: String? = nil, phoneticFamilyName: String? = nil,
+             phoneticHonorificPrefix: String? = nil,
+             phoneticHonorificSuffix: String? = nil) {
+            self.givenName = givenName
+            self.familyName = familyName
+            self.middleName = middleName
+            self.honorificPrefix = honorificPrefix
+            self.honorificSuffix = honorificSuffix
+            self.phoneticGivenName = phoneticGivenName
+            self.phoneticMiddleName = phoneticMiddleName
+            self.phoneticFamilyName = phoneticFamilyName
+            self.phoneticHonorificPrefix = phoneticHonorificPrefix
+            self.phoneticHonorificSuffix = phoneticHonorificSuffix
+        }
+    }
     struct Value: Encodable { let value: String }
     let etag: String?
     let metadata: ContactMetadata?
@@ -2109,7 +2153,18 @@ private struct ContactMetadata: Codable {
     let sources: [Source]?
 }
 private struct ContactReadback: Decodable {
-    struct Name: Decodable { let givenName: String?; let familyName: String? }
+    struct Name: Decodable {
+        let givenName: String?
+        let familyName: String?
+        let middleName: String?
+        let honorificPrefix: String?
+        let honorificSuffix: String?
+        let phoneticGivenName: String?
+        let phoneticMiddleName: String?
+        let phoneticFamilyName: String?
+        let phoneticHonorificPrefix: String?
+        let phoneticHonorificSuffix: String?
+    }
     let etag: String?
     let metadata: ContactMetadata?
     let names: [Name]?
@@ -2220,9 +2275,19 @@ struct ContactsUpdate: AsyncParsableCommand {
         let names: [ContactWrite.Name]?
         if updatingName {
             let cur = current.names?.first
+            // Overwrite only the requested part; carry every other component
+            // forward so updatePersonFields=names doesn't silently drop them.
             names = [ContactWrite.Name(
                 givenName: given?.trimmingCharacters(in: .whitespaces) ?? cur?.givenName,
-                familyName: family?.trimmingCharacters(in: .whitespaces) ?? cur?.familyName)]
+                familyName: family?.trimmingCharacters(in: .whitespaces) ?? cur?.familyName,
+                middleName: cur?.middleName,
+                honorificPrefix: cur?.honorificPrefix,
+                honorificSuffix: cur?.honorificSuffix,
+                phoneticGivenName: cur?.phoneticGivenName,
+                phoneticMiddleName: cur?.phoneticMiddleName,
+                phoneticFamilyName: cur?.phoneticFamilyName,
+                phoneticHonorificPrefix: cur?.phoneticHonorificPrefix,
+                phoneticHonorificSuffix: cur?.phoneticHonorificSuffix)]
         } else {
             names = nil
         }
