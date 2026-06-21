@@ -2932,8 +2932,11 @@ extension Trait where Self == WriteTierTrait {
     @Test func slidesDeleteSlidePostsDeleteObject() async throws {
         let shell = Shell()
         shell.registerGogCommands()
+        // The same response serves the validation GET (s1 is a real slide) and
+        // the deleteObject POST.
         let transport = RecordingTransport(
-            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"slides":[{"objectId":"s1"}]}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
@@ -2947,6 +2950,26 @@ extension Trait where Self == WriteTierTrait {
             == true)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("deleteObject") && body.contains(#""objectId":"s1""#))
+    }
+
+    @Test func slidesDeleteSlideRejectsNonSlideId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // x9 isn't among the presentation's slide object IDs — refuse (exit 2)
+        // rather than deleteObject an arbitrary page element.
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"slides":[{"objectId":"s1"}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides delete-slide P1 x9")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("not a slide"))
+        #expect(transport.lastMethod == "GET")   // no deleteObject POST issued
     }
 
     @Test func formsGetRenders() async throws {

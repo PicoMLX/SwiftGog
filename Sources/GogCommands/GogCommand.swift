@@ -3496,6 +3496,30 @@ struct SlidesDeleteSlide: AsyncParsableCommand {
 
     func run() async throws {
         try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete slide: \(slideId)\n")
+            return
+        }
+        // deleteObject removes ANY page element (shape/table/image), so confirm
+        // the ID is a real slide first — a mistyped/element ID must not quietly
+        // delete non-slide content under a command named delete-slide.
+        let listURL = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId))",
+            query: [URLQueryItem(name: "fields", value: "slides(objectId)")])
+        struct Deck: Decodable {
+            struct Slide: Decodable { let objectId: String? }
+            let slides: [Slide]?
+        }
+        let slideIds = (try JSONDecoder().decode(
+            Deck.self, from: try await GoogleHTTPClient().get(listURL)).slides ?? [])
+            .compactMap(\.objectId)
+        guard slideIds.contains(slideId) else {
+            Shell.bashCurrent.stderr(
+                "gog: \(slideId) is not a slide in this presentation "
+                    + "(see `slides list-slides`)\n")
+            throw ExitCode(2)
+        }
         struct Batch: Encodable {
             struct Request: Encodable {
                 struct DeleteObject: Encodable { let objectId: String }
@@ -3505,11 +3529,6 @@ struct SlidesDeleteSlide: AsyncParsableCommand {
         }
         let payload = try JSONEncoder().encode(Batch(requests: [
             .init(deleteObject: .init(objectId: slideId))]))
-        if dryRun {
-            Shell.bashCurrent.stderr("dry-run: not deleting\n")
-            Shell.bashCurrent.stdout("would delete slide: \(slideId)\n")
-            return
-        }
         let url = try googleURL(
             "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
