@@ -1,13 +1,14 @@
 ---
 name: gog
-description: "gog: sandboxed Google Workspace CLI for SwiftBash — JSON-first reads/writes for Drive, Gmail, and Calendar, with host-managed auth."
+description: "gog: sandboxed Google Workspace CLI for SwiftBash — JSON-first reads and host-gated writes across Drive, Gmail, Calendar, Tasks, Sheets, Contacts and more, with host-managed auth."
 ---
 
 # gog
 
 `gog` is a Google Workspace CLI that runs **inside SwiftBash's sandbox**. Use it
-to read and write Google Drive, Gmail, and Calendar from shell automation that
-needs stable JSON. It pipes like any other command:
+to read and write Google Drive, Gmail, Calendar, Tasks, Sheets, Contacts and
+more from shell automation that needs stable JSON. Writes are gated by a
+host-set capability tier (read-only by default). It pipes like any other command:
 
 ```bash
 gog drive ls --max 20 --json | jq '.files[].name'
@@ -32,14 +33,24 @@ gog drive ls --max 20 --json | jq '.files[].name'
 
 - **Never print tokens or secrets.** `gog` does not emit them, they are not in
   the environment, and you should not try to extract or echo credentials.
-- **Sending email is gated.** `gog gmail send` refuses to send when the host has
-  disabled sending (exit 3). Use `--dry-run` to preview a message without
-  sending. Only send when sending is the requested task.
-- **Directory writes are gated.** `gog admin suspend`/`unsuspend` and `gog admin
-  member-add`/`member-remove` refuse (exit 3) unless the host has enabled admin
-  writes; they are off by default because they affect the whole domain.
-- **Preview writes with `--dry-run`** where supported (`gmail send`,
-  `calendar create`, the `gog admin` writes) before performing the mutation.
+- **Data writes need a host-granted tier.** Every create / edit / delete across
+  Drive, Gmail (labels · trash · drafts), Calendar, Tasks, Sheets, and Contacts
+  is gated by a write tier the host sets — **read-only by default**, so writes
+  refuse with **exit 3** until the host grants `edit` (additive / in-place /
+  reversible: create, rename, update, append, mkdir, cp, untrash, label edits)
+  or `full` (also destructive or exposing: delete, trash, move, share, unshare,
+  clear, adding the TRASH/SPAM labels, and copying or uploading *into a folder*).
+  You **cannot** raise this from the command line — it is host-only. If a write
+  exits 3 with "needs write tier …", it wasn't granted; don't try to bypass it.
+- **Sending and directory writes have separate switches.** `gog gmail send` and
+  `gog chat send` refuse (exit 3) when the host disables sending; `gog admin`
+  suspend/unsuspend and member-add/remove are **off by default** (domain-wide
+  blast radius) until the host enables admin writes. These are independent of the
+  write tier above.
+- **Preview writes with `--dry-run` where supported.** Most mutating commands
+  build and print the request without calling Google when `--dry-run` is passed
+  (a few simple writes — e.g. `drive upload`, `tasks add` — omit it). Use it
+  before a mutation when available; only mutate when that is the requested task.
 - **Command availability is host-controlled.** The host registers only the
   commands it allows; if a command isn't available, it wasn't enabled.
 
@@ -63,6 +74,19 @@ gog drive download <fileId> --out /gog/report.pdf
 gog drive permissions <fileId> --json   # who can access it (id, role, type, who)
 gog drive revisions <fileId> --json      # version history
 gog drive about --json                    # storage quota + account
+
+# Writes — need the host's write tier (read-only by default); most preview with --dry-run
+gog drive upload /gog/report.pdf --name Report.pdf      # edit; no --dry-run (--parent needs full)
+gog drive mkdir 'Q3 Reports' --parent <folderId>         # edit
+gog drive rename <fileId> --name 'Final.pdf'             # edit
+gog drive cp <fileId> --name Copy.pdf                    # edit (--parent needs full)
+gog drive untrash <fileId>                               # edit
+gog drive trash <fileId>                                 # full (reversible via untrash)
+gog drive mv <fileId> --to <folderId> [--from <oldId>]   # full
+gog drive share <fileId> --email user@x.com --role reader   # full
+gog drive share <fileId> --anyone --role reader             # full
+gog drive unshare <fileId> --permission <permId>            # full
+# share --notify emails the grantee: an outbound send NOT covered by the send gate
 ```
 
 `download` writes into the sandbox workspace — choose a path under a mount
@@ -80,13 +104,18 @@ gog gmail labels --json
 gog gmail threads -q 'newer_than:7d' --json   # list threads
 gog gmail thread <threadId> --json            # a thread's messages (From/Subject)
 gog gmail drafts --json                        # list drafts
-gog gmail draft --to user@example.com --subject 'Hi' --body 'Hello'  # compose (does NOT send)
+gog gmail draft --to user@example.com --subject 'Hi' --body 'Hello'  # edit write — saves a draft; does NOT send
 gog gmail attachments <messageId> --json   # discover attachment IDs (id, filename, type, size)
 gog gmail attachment <messageId> <attachmentId> --out /gog/file.pdf  # then download to sandbox
+
+# Writes
+gog gmail modify <messageId> --add-label STARRED --remove-label UNREAD   # edit
+gog gmail untrash <messageId>                # edit
+gog gmail trash <messageId>                  # full — reversible (adding TRASH/SPAM via modify also needs full)
 ```
 
 Drop `--dry-run` to actually send (subject to the host send policy). `gog gmail
-draft` only composes — it never sends, so it isn't gated by the send policy.
+draft` only composes — it never sends (so it isn't gated by the send policy) — but it *is* an `.edit` write that saves a draft, so it needs the write tier.
 
 ## Calendar
 
@@ -95,12 +124,16 @@ gog calendar events --max 20 --json
 gog calendar events --from 2026-06-01T00:00:00Z --json
 gog calendar get <eventId> --json
 gog calendar create --summary 'Standup' \
-  --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z --dry-run
+  --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z --dry-run   # edit
 
 gog calendar calendars --json                 # your calendar list (id, summary, role)
 gog calendar freebusy --json                  # busy slots, next 24h on primary
 gog calendar freebusy --from <RFC3339> --to <RFC3339> \
   --calendar primary --calendar team@example.com --json   # busy across calendars
+
+# Writes
+gog calendar update <eventId> --summary 'Renamed' --dry-run   # edit (needs ≥1 field)
+gog calendar delete <eventId>                                 # full (alias: rm)
 ```
 
 ## Contacts
@@ -110,6 +143,12 @@ gog contacts list --max 20 --json
 gog contacts get people/c123 --json
 gog contacts search 'jane' --json        # resolve a name → email (People searchContacts)
 gog contacts other --json                 # auto-saved "other contacts"
+
+# Writes
+gog contacts create --given Jane --family Doe --email jane@x.com   # edit
+gog contacts update people/c123 --given Janet                      # edit (name only; keeps other parts)
+# NB: --email / --phone REPLACE the whole set — pass every value you want to keep
+gog contacts delete people/c123                                    # full
 ```
 
 ## Tasks
@@ -117,7 +156,9 @@ gog contacts other --json                 # auto-saved "other contacts"
 ```bash
 gog tasks lists --json
 gog tasks list --list <listId> --json
-gog tasks add 'Buy milk' --list <listId>
+gog tasks add 'Buy milk' --list <listId>                # edit (no --dry-run)
+gog tasks complete <taskId> --list <listId>             # edit (alias: done)
+gog tasks delete <taskId> --list <listId>               # full (alias: rm)
 ```
 
 ## Docs
@@ -132,7 +173,9 @@ gog docs cat <documentId> --out /gog/doc.md
 
 ```bash
 gog sheets get <spreadsheetId> 'Sheet1!A1:D20' --json
-gog sheets update <spreadsheetId> 'Sheet1!A1' --values-json '[["hello","world"]]' --dry-run
+gog sheets update <spreadsheetId> 'Sheet1!A1' --values-json '[["hello","world"]]' --dry-run  # edit
+gog sheets append <spreadsheetId> 'Sheet1!A1' --values-json '[["a","b"]]'   # edit (after the table)
+gog sheets clear <spreadsheetId> 'Sheet1!A1:D9'                             # full
 ```
 
 ## Slides
