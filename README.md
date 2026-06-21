@@ -101,7 +101,9 @@ shell.networkConfig = NetworkConfig(
         AllowedURLEntry("https://gmail.googleapis.com/"),   // Gmail
         AllowedURLEntry("https://people.googleapis.com/"),  // identity + contacts
         AllowedURLEntry("https://tasks.googleapis.com/"),   // Tasks
-        AllowedURLEntry("https://sheets.googleapis.com/"),  // Sheets (Docs/Slides export via www)
+        AllowedURLEntry("https://sheets.googleapis.com/"),  // Sheets
+        AllowedURLEntry("https://docs.googleapis.com/"),    // Docs writes (reads export via www)
+        AllowedURLEntry("https://slides.googleapis.com/"),  // Slides writes (reads export via www)
         AllowedURLEntry("https://chat.googleapis.com/"),    // Chat
         AllowedURLEntry("https://forms.googleapis.com/"),   // Forms
         AllowedURLEntry("https://youtube.googleapis.com/"), // YouTube
