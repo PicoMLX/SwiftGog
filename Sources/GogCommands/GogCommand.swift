@@ -256,6 +256,10 @@ struct DriveUpload: AsyncParsableCommand {
 
     func run() async throws {
         try requireWriteTier(.edit)
+        // Uploading into a parent folder inherits that folder's sharing, so a
+        // shared --parent exposes the file (sandbox data) without `drive share`.
+        // Mirror parented copy: require .full when a destination folder is set.
+        if parent != nil { try requireWriteTier(.full) }
         let resolved = Shell.bashCurrent.resolvePath(path)
         let data: Data
         do {
@@ -1222,6 +1226,8 @@ struct GmailDraft: AsyncParsableCommand {
     @Option(name: .long, help: "Subject line.") var subject: String = ""
     @Option(name: [.customShort("b"), .long], help: "Message body (plain text).")
     var body: String = ""
+    @Flag(name: .long, help: "Build the request but do not create the draft.")
+    var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit the raw draft result JSON.")
     var json: Bool = false
 
@@ -1230,6 +1236,11 @@ struct GmailDraft: AsyncParsableCommand {
         let mimeData = try plainTextMIME(to: to, subject: subject, body: body)
         let payload = try JSONEncoder().encode(
             ["message": ["raw": mimeData.base64URLEncodedString()]])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating draft\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
         let url = try googleURL("https://gmail.googleapis.com/gmail/v1/users/me/drafts")
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {

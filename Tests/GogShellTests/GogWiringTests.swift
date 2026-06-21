@@ -1937,6 +1937,27 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("write tier 'full'"))
     }
 
+    @Test func gmailDraftDryRunDoesNotCreate() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog gmail draft --to a@b.com --subject Hi --body Yo --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not creating draft"))
+        #expect(run.stdout.contains("message"))   // the MIME payload preview
+    }
+
+    @Test func driveUploadIntoParentNeedsFullTier() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Uploading into a folder can expose the file, like a parented copy.
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog drive upload /gog/x.txt --parent SHARED")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()
