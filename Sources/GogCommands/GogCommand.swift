@@ -2841,7 +2841,7 @@ struct DocsFindReplace: AsyncParsableCommand {
             throw ExitCode(2)
         }
         let payload = try JSONEncoder().encode(
-            DocsReplaceBatch(find: find, replace: replace, matchCase: matchCase))
+            ReplaceAllTextBatch(find: find, replace: replace, matchCase: matchCase))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not modifying\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
@@ -2859,7 +2859,7 @@ struct DocsFindReplace: AsyncParsableCommand {
 }
 
 /// A `replaceAllText` batchUpdate body, shared by Docs and Slides find-replace.
-private struct DocsReplaceBatch: Encodable {
+private struct ReplaceAllTextBatch: Encodable {
     struct Request: Encodable {
         struct ReplaceAllText: Encodable {
             struct ContainsText: Encodable { let text: String; let matchCase: Bool }
@@ -3343,7 +3343,7 @@ struct SlidesReplaceText: AsyncParsableCommand {
             throw ExitCode(2)
         }
         let payload = try JSONEncoder().encode(
-            DocsReplaceBatch(find: find, replace: replace, matchCase: matchCase))
+            ReplaceAllTextBatch(find: find, replace: replace, matchCase: matchCase))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not modifying\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
