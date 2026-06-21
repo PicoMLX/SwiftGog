@@ -30,11 +30,14 @@ hints/progress/errors to **stderr**, composable through pipes.
   upload targets must be sandbox paths.
 - **Network is allow-listed.** Only the Google API hosts you configure are
   reachable; with no `networkConfig`, networked commands fail closed (exit 7).
-- **Sends and directory writes are gated.** `gmail send`, `chat send`, and the
-  `admin` directory writes consult a host `GogPolicy` (and support `--dry-run`).
-  Other write commands (e.g. `drive upload`, `calendar create`, `sheets update`,
-  `tasks add`) are **not** policy-gated — restrict those via the token's scopes
-  and the network allow-list.
+- **Writes are gated by a host capability tier.** Every data mutation (create,
+  edit, delete across Drive, Gmail labels·trash·drafts, Calendar, Tasks, Sheets,
+  Contacts) requires a `GogWriteTier` the host grants — `.readOnly` by default,
+  so data writes fail closed (exit 3) until the host raises it to `.edit` or
+  `.full`. The tier is host-only (a task-local, never a flag or env var), so
+  LLM-authored bash can't raise its own access. Sending (`gmail send`,
+  `chat send`) and `admin` directory writes keep their own dedicated `GogPolicy`
+  switches, and every write supports `--dry-run`.
 
 See [`PLAN.md`](PLAN.md) for the full architecture and decisions, and
 [`.agents/skills/gog/SKILL.md`](.agents/skills/gog/SKILL.md) for the
@@ -135,21 +138,40 @@ try await GogCredentials.$current.withValue(tenantB.provider) { … }   // tenan
 
 ## Safety policy & gated writes
 
-`GogPolicy` (bound via `GogPolicies.$current`) lets the host disable specific
-mutations. Sending is allowed by default but can be turned off; high-blast-radius
-directory mutations are **off by default** and must be opted in. Every gated
-write also supports `--dry-run`, which builds and prints the request without
-calling Google.
+`GogPolicy` (bound via `GogPolicies.$current`) is how the host controls
+mutations. It has two parts:
+
+- **`writeTier`** governs every **data mutation** (create / edit / delete across
+  Drive, Gmail labels·trash·drafts, Calendar, Tasks, Sheets, Contacts):
+  - `.readOnly` *(default)* — all data writes fail closed; list / get / search
+    / download / export only.
+  - `.edit` — additive, in-place, or reversible writes (create, rename, update,
+    append, mkdir, cp, untrash, label edits).
+  - `.full` — also destructive, irreversible, or sharing writes (delete, trash,
+    move, share, unshare, clear).
+
+  The tiers are ordered `.full > .edit > .readOnly`, so each includes the ones
+  below it. (Adding the `TRASH`/`SPAM` Gmail labels needs `.full`, since that is
+  really a trash, not a label edit.)
+- **Dedicated switches** for the non-data flows, orthogonal to `writeTier`:
+  `gmailSendDisabled` / `chatSendDisabled` (outbound mail & chat — *enabled* by
+  default) and `adminWriteDisabled` (directory writes — *disabled* by default).
+  A fully locked-down host sets `writeTier: .readOnly` **and** disables sending.
 
 ```swift
-// Disable outbound mail and chat for this run.
-GogPolicy(gmailSendDisabled: true, chatSendDisabled: true)
+// Allow reversible data edits, but block destructive ops and all sending.
+GogPolicy(gmailSendDisabled: true, chatSendDisabled: true, writeTier: .edit)
 ```
 
-A blocked mutation fails closed with **exit 3** before any network call.
+`writeTier` is **host-only** — bound as a task-local, never a command flag or
+environment variable — so LLM-authored bash inside the shell cannot raise its
+own access. Every write also supports `--dry-run` (build and print the request
+without calling Google), and a blocked write fails closed with **exit 3** before
+any network call.
+
 `registerGogCommands()` installs the **full** command tree (selective
-installation is not part of the public API today), so the remaining levers for
-ungated writes are the token's scopes and the network allow-list.
+installation is not part of the public API today); `writeTier` is the lever for
+what that tree is allowed to mutate.
 
 ### Compatibility note: directory-write gating differs from `gogcli`
 
@@ -172,7 +194,7 @@ behaviour; the control simply moves from argv to host policy.
 | 0    | success                                                                   |
 | 1    | a Google API error (HTTP ≥ 400); the message is echoed to stderr          |
 | 2    | usage / validation error (bad flag, out-of-range `--max`, bad input)      |
-| 3    | refused by host policy (sending/admin writes disabled), or `--fail-empty` with no results |
+| 3    | refused by host policy (write tier too low, or sending/admin disabled), or `--fail-empty` with no results |
 | 7    | fail-closed: no network configured, or missing / rejected credentials     |
 | 23   | could not write the requested sandbox destination                         |
 
@@ -215,6 +237,7 @@ sandbox-deny tests, and per-command behaviour).
 
 The command surface spans identity, Drive, Gmail, Calendar, Contacts, Tasks,
 Docs, Sheets, Slides, Chat, Forms, YouTube, and Admin (Directory + Reports),
-read-first with gated writes. See
+read-first, with every data write behind a host-set capability tier
+(`GogWriteTier`, read-only by default). See
 [`.agents/skills/gog/SKILL.md`](.agents/skills/gog/SKILL.md) for the current
 command list and [`PLAN.md`](PLAN.md) for the roadmap.
