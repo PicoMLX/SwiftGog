@@ -1958,6 +1958,28 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("write tier 'full'"))
     }
 
+    @Test func sheetsUpdateBlankCellStaysEditTier() async throws {
+        // Writing "" via `update` is a targeted overwrite, not a `clear`, so it
+        // stays allowed at .edit (clearing a whole range is the .full op). Pins
+        // that deliberate choice so the tier never becomes value-dependent.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"updatedCells":1}"#.utf8)))
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing(
+                        #"gog sheets update S1 'Sheet1!A1' --values-json '[[""]]'"#)
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "PUT")
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()

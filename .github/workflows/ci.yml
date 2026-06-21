@@ -72,7 +72,10 @@ jobs:
       # that requires a freshly-added SwiftPorts product (e.g. Sqlite3Shell)
       # fails to resolve against the cached, older SwiftPorts. Re-resolve to
       # current main every run so the cache only speeds up compilation, never
-      # pins dependency revisions.
+      # pins dependency revisions. The update is intentionally unscoped: the
+      # branch-pinned set lives in SwiftBash's manifest, not here, so naming
+      # packages would silently go stale; since the cache never pins revisions,
+      # a blanket re-resolve can't wedge an unrelated PR.
       - name: Refresh main-pinned dependencies
         working-directory: SwiftGog
         run: swift package update
