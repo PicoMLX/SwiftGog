@@ -2685,9 +2685,9 @@ private struct TaskItem: Decodable {
 struct GogDocs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "docs",
-        abstract: "Google Docs (export via Drive; create/append/find-replace).",
+        abstract: "Google Docs (export via Drive; create/append/find-replace/clear).",
         subcommands: [DocsCat.self, DocsCreate.self, DocsAppend.self,
-                      DocsFindReplace.self],
+                      DocsFindReplace.self, DocsClear.self],
         aliases: ["doc"])
 }
 
@@ -2885,6 +2885,70 @@ private struct ReplaceAllTextBatch: Encodable {
         requests = [.init(replaceAllText: .init(
             containsText: .init(text: find, matchCase: matchCase),
             replaceText: replace))]
+    }
+}
+
+/// `gog docs clear <documentId>` — delete all body content from a Doc (Docs
+/// `batchUpdate` deleteContentRange). Reads the doc first to find its extent;
+/// the trailing newline at the end can't be deleted, so it always remains.
+struct DocsClear: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear",
+        abstract: "Delete all content from a Doc (--dry-run to preview).")
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Flag(name: .long, help: "Build the request but do not clear.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not clearing\n")
+            Shell.bashCurrent.stdout("would clear all content: \(documentId)\n")
+            return
+        }
+        // deleteContentRange needs an explicit range, so read the body extent
+        // first. (Empty / tab-only docs report no body content and are left as-is.)
+        let getURL = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId))",
+            query: [URLQueryItem(name: "fields", value: "body(content(endIndex))")])
+        struct DocBody: Decodable {
+            struct Body: Decodable {
+                struct Element: Decodable { let endIndex: Int? }
+                let content: [Element]?
+            }
+            let body: Body?
+        }
+        let doc = try JSONDecoder().decode(
+            DocBody.self, from: try await GoogleHTTPClient().get(getURL))
+        let end = doc.body?.content?.compactMap(\.endIndex).max() ?? 1
+        guard end > 2 else {
+            Shell.bashCurrent.stdout("already empty: \(documentId)\n")
+            return
+        }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct DeleteContentRange: Encodable {
+                    struct Range: Encodable { let startIndex: Int; let endIndex: Int }
+                    let range: Range
+                }
+                let deleteContentRange: DeleteContentRange
+            }
+            let requests: [Request]
+        }
+        // Body content starts at index 1; keep the mandatory final newline.
+        let payload = try JSONEncoder().encode(Batch(requests: [
+            .init(deleteContentRange: .init(range: .init(startIndex: 1, endIndex: end - 1)))]))
+        let url = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("cleared: \(documentId)\n")
     }
 }
 
@@ -3217,9 +3281,10 @@ private func tsvEscaped(_ value: String) -> String {
 struct GogSlides: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "slides",
-        abstract: "Google Slides (export via Drive; create/add-slide/replace-text).",
+        abstract: "Google Slides (export, create, edit, list/delete slides).",
         subcommands: [SlidesExport.self, SlidesCreate.self, SlidesAddSlide.self,
-                      SlidesReplaceText.self],
+                      SlidesReplaceText.self, SlidesListSlides.self,
+                      SlidesDeleteSlide.self],
         aliases: ["slide"])
 }
 
@@ -3369,6 +3434,84 @@ struct SlidesReplaceText: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("replaced in: \(presentationId)\n")
+    }
+}
+
+/// `gog slides list-slides <presentationId>` — list slide object IDs (pass one
+/// to `slides delete-slide`). Prints `index<TAB>objectId` per slide.
+struct SlidesListSlides: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list-slides",
+        abstract: "List a presentation's slide object IDs.")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId))",
+            query: [URLQueryItem(name: "fields", value: "slides(objectId)")])
+        let data = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self) + "\n")
+            return
+        }
+        struct Deck: Decodable {
+            struct Slide: Decodable { let objectId: String? }
+            let slides: [Slide]?
+        }
+        let ids = (try JSONDecoder().decode(Deck.self, from: data).slides ?? [])
+            .compactMap(\.objectId)
+        guard !ids.isEmpty else {
+            Shell.bashCurrent.stderr("no slides\n")
+            return
+        }
+        for (i, id) in ids.enumerated() {
+            Shell.bashCurrent.stdout("\(i + 1)\t\(id)\n")
+        }
+    }
+}
+
+/// `gog slides delete-slide <presentationId> <slideObjectId>` — delete a slide
+/// (Slides `batchUpdate` deleteObject). Find object IDs with `slides list-slides`.
+struct SlidesDeleteSlide: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete-slide",
+        abstract: "Delete a slide by object ID (--dry-run to preview).",
+        aliases: ["rm-slide"])
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Slide object ID (from `slides list-slides`).") var slideId: String
+    @Flag(name: .long, help: "Build the request but do not delete.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct DeleteObject: Encodable { let objectId: String }
+                let deleteObject: DeleteObject
+            }
+            let requests: [Request]
+        }
+        let payload = try JSONEncoder().encode(Batch(requests: [
+            .init(deleteObject: .init(objectId: slideId))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete slide: \(slideId)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("deleted slide: \(slideId)\n")
     }
 }
 

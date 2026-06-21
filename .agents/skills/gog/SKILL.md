@@ -172,6 +172,7 @@ gog docs cat <documentId> --out /gog/doc.md
 gog docs create --title 'Notes'                              # edit
 gog docs append <documentId> --text 'A new paragraph.'       # edit
 gog docs find-replace <documentId> --find foo --replace bar  # edit
+gog docs clear <documentId>                                  # full (empties content, keeps the doc)
 ```
 
 ## Sheets
@@ -193,6 +194,8 @@ gog slides export <presentationId> --mime text/plain --out /gog/deck.txt
 gog slides create --title 'Deck'                                  # edit
 gog slides add-slide <presentationId>                             # edit (blank slide)
 gog slides replace-text <presentationId> --find foo --replace bar # edit
+gog slides list-slides <presentationId>                           # read (slide objectIds)
+gog slides delete-slide <presentationId> <slideObjectId>          # full
 ```
 
 ## Chat
