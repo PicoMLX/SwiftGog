@@ -104,7 +104,7 @@ gog gmail labels --json
 gog gmail threads -q 'newer_than:7d' --json   # list threads
 gog gmail thread <threadId> --json            # a thread's messages (From/Subject)
 gog gmail drafts --json                        # list drafts
-gog gmail draft --to user@example.com --subject 'Hi' --body 'Hello'  # compose (does NOT send)
+gog gmail draft --to user@example.com --subject 'Hi' --body 'Hello'  # edit write — saves a draft; does NOT send
 gog gmail attachments <messageId> --json   # discover attachment IDs (id, filename, type, size)
 gog gmail attachment <messageId> <attachmentId> --out /gog/file.pdf  # then download to sandbox
 
@@ -115,7 +115,7 @@ gog gmail trash <messageId>                  # full — reversible (adding TRASH
 ```
 
 Drop `--dry-run` to actually send (subject to the host send policy). `gog gmail
-draft` only composes — it never sends, so it isn't gated by the send policy.
+draft` only composes — it never sends (so it isn't gated by the send policy) — but it *is* an `.edit` write that saves a draft, so it needs the write tier.
 
 ## Calendar
 
@@ -146,7 +146,8 @@ gog contacts other --json                 # auto-saved "other contacts"
 
 # Writes
 gog contacts create --given Jane --family Doe --email jane@x.com   # edit
-gog contacts update people/c123 --given Janet --email new@x.com    # edit (keeps other name parts)
+gog contacts update people/c123 --given Janet                      # edit (name only; keeps other parts)
+# NB: --email / --phone REPLACE the whole set — pass every value you want to keep
 gog contacts delete people/c123                                    # full
 ```
 
