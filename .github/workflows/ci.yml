@@ -63,8 +63,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: SwiftGog/.build
-          key: spm-${{ runner.os }}-${{ hashFiles('SwiftGog/Package.swift') }}
-          restore-keys: spm-${{ runner.os }}-
+          key: spm-v2-${{ runner.os }}-${{ hashFiles('SwiftGog/Package.swift') }}
+          restore-keys: spm-v2-${{ runner.os }}-
+
+      # SwiftBash and its SwiftPorts / ShellKit / SwiftScript deps are pinned to
+      # `branch: "main"` (unpinned). A restored .build cache otherwise keeps the
+      # stale dependency checkouts it was built with, so a newer SwiftBash main
+      # that requires a freshly-added SwiftPorts product (e.g. Sqlite3Shell)
+      # fails to resolve against the cached, older SwiftPorts. Re-resolve to
+      # current main every run so the cache only speeds up compilation, never
+      # pins dependency revisions.
+      - name: Refresh main-pinned dependencies
+        working-directory: SwiftGog
+        run: swift package update
 
       - name: Build (including tests)
         working-directory: SwiftGog

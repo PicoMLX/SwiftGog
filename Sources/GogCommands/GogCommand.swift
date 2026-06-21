@@ -69,6 +69,20 @@ private func googleURL(_ base: String, id: String? = nil,
     return url
 }
 
+/// Host-policy gate for write commands: the tier the host granted
+/// (`GogPolicies.current.writeTier`) must be at least `required`, else exit 3.
+/// Read from the task-local policy only — never a flag or environment variable —
+/// so LLM-authored bash can't escalate its own access.
+private func requireWriteTier(_ required: GogWriteTier) throws {
+    let granted = GogPolicies.current.writeTier
+    if granted < required {
+        Shell.bashCurrent.stderr(
+            "gog: this command needs write tier '\(required)', but host policy "
+                + "grants '\(granted)' (read-only by default)\n")
+        throw ExitCode(3)
+    }
+}
+
 /// Percent-encode a value that is a *single* path segment (an id, a user/group
 /// key, a Sheets range): unlike `.urlPathAllowed` it also escapes "/" so a
 /// stray separator becomes %2F instead of restructuring the request path.
@@ -167,6 +181,8 @@ struct GogDrive: AsyncParsableCommand {
         subcommands: [
             DriveLs.self, DriveGet.self, DriveSearch.self,
             DriveDownload.self, DriveUpload.self,
+            DriveTrash.self, DriveUntrash.self, DriveRename.self, DriveMkdir.self,
+            DriveCopy.self, DriveMove.self, DriveShare.self, DriveUnshare.self,
             DrivePermissions.self, DriveRevisions.self, DriveAbout.self,
         ],
         aliases: ["drv"])
@@ -239,6 +255,11 @@ struct DriveUpload: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
+        // Uploading into a parent folder inherits that folder's sharing, so a
+        // shared --parent exposes the file (sandbox data) without `drive share`.
+        // Mirror parented copy: require .full when a destination folder is set.
+        if parent != nil { try requireWriteTier(.full) }
         let resolved = Shell.bashCurrent.resolvePath(path)
         let data: Data
         do {
@@ -332,7 +353,7 @@ struct DriveGet: AsyncParsableCommand {
 
     func run() async throws {
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id,
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
             query: [URLQueryItem(
                 name: "fields", value: "id,name,mimeType,modifiedTime,size,parents")])
         let body = try await GoogleHTTPClient().get(url)
@@ -406,7 +427,7 @@ struct DriveDownload: AsyncParsableCommand {
         // download, so an out-of-mount path fails closed without a fetch.
         try await ensureWritableDestination(resolved, label: out)
         let url = try googleURL(
-            "https://www.googleapis.com/drive/v3/files", id: id,
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
             query: [URLQueryItem(name: "alt", value: "media")])
         // Write the destination only after a successful fetch.
         let data = try await GoogleHTTPClient().get(url)
@@ -559,6 +580,359 @@ struct DriveAbout: AsyncParsableCommand {
     }
 }
 
+/// Drive write endpoints must opt into shared drives, mirroring the read
+/// commands (`permissions`/`revisions` already pass `supportsAllDrives`).
+private let driveSharedDrive = URLQueryItem(name: "supportsAllDrives", value: "true")
+
+/// `gog drive trash <id>` — move a file to Trash (reversible via untrash).
+struct DriveTrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "trash",
+        abstract: "Move a Drive file to Trash (--dry-run to preview).")
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Flag(name: .long, help: "Show what would be trashed without trashing.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not trashing\n")
+            Shell.bashCurrent.stdout("would trash: \(id)\n")
+            return
+        }
+        let payload = try JSONEncoder().encode(["trashed": true])
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
+            query: [driveSharedDrive])
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("trashed: \(id)\n")
+    }
+}
+
+/// `gog drive untrash <id>` — restore a file from Trash.
+struct DriveUntrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "untrash",
+        abstract: "Restore a Drive file from Trash (--dry-run to preview).")
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Flag(name: .long, help: "Show what would be restored without restoring.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not untrashing\n")
+            Shell.bashCurrent.stdout("would untrash: \(id)\n")
+            return
+        }
+        let payload = try JSONEncoder().encode(["trashed": false])
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
+            query: [driveSharedDrive])
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("untrashed: \(id)\n")
+    }
+}
+
+/// `gog drive rename <id> --name <newName>` — rename a Drive file.
+struct DriveRename: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rename",
+        abstract: "Rename a Drive file (--dry-run to preview).")
+
+    @Argument(help: "Drive file ID.") var id: String
+    @Option(name: .long, help: "New file name.") var name: String
+    @Flag(name: .long, help: "Build the request but do not rename.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        let payload = try JSONEncoder().encode(["name": name])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not renaming\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
+            query: [driveSharedDrive])
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: result)
+        Shell.bashCurrent.stdout("renamed: \(file.id ?? id)\t\(file.name ?? name)\n")
+    }
+}
+
+/// `gog drive mkdir <name>` — create a folder, optionally inside `--parent`.
+struct DriveMkdir: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mkdir",
+        abstract: "Create a Drive folder (--dry-run to preview).")
+
+    @Argument(help: "Folder name.") var name: String
+    @Option(name: .long, help: "Parent folder ID (default: My Drive root).")
+    var parent: String?
+    @Flag(name: .long, help: "Build the request but do not create the folder.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        struct NewFolder: Encodable {
+            let name: String
+            let mimeType: String
+            let parents: [String]?
+        }
+        let payload = try JSONEncoder().encode(NewFolder(
+            name: name,
+            mimeType: "application/vnd.google-apps.folder",
+            parents: parent.map { [$0] }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating folder\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files", query: [driveSharedDrive])
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: result)
+        Shell.bashCurrent.stdout(
+            "created folder: \(file.id ?? "")\t\(file.name ?? name)\n")
+    }
+}
+
+/// `gog drive cp <id>` — copy a file, optionally renaming and/or into `--parent`.
+struct DriveCopy: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "cp",
+        abstract: "Copy a Drive file (--dry-run to preview).",
+        aliases: ["copy"])
+
+    @Argument(help: "Drive file ID to copy.") var id: String
+    @Option(name: .long, help: "Name for the copy (default: Google's \"Copy of …\").")
+    var name: String?
+    @Option(name: .long, help: "Destination parent folder ID.") var parent: String?
+    @Flag(name: .long, help: "Build the request but do not copy.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        // Copying into a parent folder can expose the data: folder permissions
+        // propagate to the copy, so a shared --parent is an implicit share.
+        // Treat a parented copy as a .full (exposing) op, like `drive share`.
+        if parent != nil { try requireWriteTier(.full) }
+        struct CopyBody: Encodable {
+            let name: String?
+            let parents: [String]?
+        }
+        let payload = try JSONEncoder().encode(
+            CopyBody(name: name, parents: parent.map { [$0] }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not copying\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))/copy",
+            query: [driveSharedDrive])
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let file = try JSONDecoder().decode(DriveFileList.File.self, from: result)
+        Shell.bashCurrent.stdout("copied: \(file.id ?? "")\t\(file.name ?? "")\n")
+    }
+}
+
+/// `gog drive mv <id> --to <parentId>` — move a file to another folder. A Drive
+/// move is a parent edit (addParents/removeParents); when `--from` is omitted we
+/// look up the current parent(s) and remove them so the file isn't left in two
+/// places.
+struct DriveMove: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mv",
+        abstract: "Move a Drive file to another folder (--dry-run to preview).",
+        aliases: ["move"])
+
+    @Argument(help: "Drive file ID to move.") var id: String
+    @Option(name: .long, help: "Destination parent folder ID.") var to: String
+    @Option(name: .long, help: "Parent ID to remove (default: all current parents).")
+    var from: String?
+    @Flag(name: .long, help: "Build the request but do not move.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not moving\n")
+            Shell.bashCurrent.stdout("would move: \(id) -> \(to)\n")
+            return
+        }
+        let removeCandidates: [String]
+        if let from {
+            removeCandidates = [from]
+        } else {
+            let metaURL = try googleURL(
+                "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))",
+                query: [URLQueryItem(name: "fields", value: "parents"),
+                        driveSharedDrive])
+            let meta = try JSONDecoder().decode(
+                DriveParents.self, from: try await GoogleHTTPClient().get(metaURL))
+            removeCandidates = meta.parents ?? []
+        }
+        // Never remove the parent we're adding: an omitted --from on a file
+        // already under `to` would otherwise send addParents=to & removeParents=to,
+        // an ambiguous parent mutation Drive can reject.
+        let remove = removeCandidates.filter { $0 != to }.joined(separator: ",")
+        var query = [URLQueryItem(name: "addParents", value: to), driveSharedDrive]
+        if !remove.isEmpty {
+            query.append(URLQueryItem(name: "removeParents", value: remove))
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))", query: query)
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: Data("{}".utf8))
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("moved: \(id) -> \(to)\n")
+    }
+}
+
+/// `gog drive share <id>` — grant access. `--email` shares with a person/group;
+/// `--anyone` makes a link anyone can open. Role: reader (default), writer, or
+/// commenter.
+struct DriveShare: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "share",
+        abstract: "Grant access to a Drive file (--dry-run to preview).")
+
+    @Argument(help: "Drive file or folder ID.") var id: String
+    @Option(name: .long, help: "Grantee email (a user or group).") var email: String?
+    @Flag(name: .long, help: "Share with anyone who has the link (no email).")
+    var anyone: Bool = false
+    @Option(name: .long, help: "Role: reader, writer, or commenter.")
+    var role: String = "reader"
+    @Option(name: .long, help: "Grantee type for --email: user or group.")
+    var type: String = "user"
+    @Flag(name: .long, help: "Email the grantee a share notification (off by default).")
+    var notify: Bool = false
+    @Flag(name: .long, help: "Build the request but do not share.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        guard ["reader", "writer", "commenter"].contains(role) else {
+            Shell.bashCurrent.stderr(
+                "gog: --role must be reader, writer, or commenter\n")
+            throw ExitCode(2)
+        }
+        guard anyone != (email != nil) else {
+            Shell.bashCurrent.stderr(
+                "gog: drive share needs exactly one of --email <addr> or --anyone\n")
+            throw ExitCode(2)
+        }
+        guard anyone || ["user", "group"].contains(type) else {
+            Shell.bashCurrent.stderr("gog: --type must be user or group\n")
+            throw ExitCode(2)
+        }
+        struct PermissionBody: Encodable {
+            let type: String
+            let role: String
+            let emailAddress: String?
+        }
+        let body = anyone
+            ? PermissionBody(type: "anyone", role: role, emailAddress: nil)
+            : PermissionBody(type: type, role: role, emailAddress: email)
+        let payload = try JSONEncoder().encode(body)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not sharing\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        var query = [driveSharedDrive]
+        if !anyone {
+            // A share notification is an outbound email; don't send it unless
+            // asked, so it can't bypass a host that disabled Gmail/Chat sending.
+            query.append(URLQueryItem(
+                name: "sendNotificationEmail", value: notify ? "true" : "false"))
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))/permissions",
+            query: query)
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let perm = try JSONDecoder().decode(SharePermission.self, from: result)
+        Shell.bashCurrent.stdout("shared: \(perm.id ?? "")\t\(role)\n")
+    }
+}
+
+/// `gog drive unshare <id> --permission <permId>` — revoke a permission (find
+/// IDs with `gog drive permissions`).
+struct DriveUnshare: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "unshare",
+        abstract: "Revoke a Drive permission by ID (--dry-run to preview).")
+
+    @Argument(help: "Drive file or folder ID.") var id: String
+    @Option(name: .long, help: "Permission ID (from `gog drive permissions`).")
+    var permission: String
+    @Flag(name: .long, help: "Show what would be revoked without revoking.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not revoking\n")
+            Shell.bashCurrent.stdout("would revoke: \(permission) on \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/drive/v3/files/\(pathSegment(id))"
+                + "/permissions/\(pathSegment(permission))",
+            query: [driveSharedDrive])
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("revoked: \(permission)\n")
+    }
+}
+
+private struct DriveParents: Decodable { let parents: [String]? }
+private struct SharePermission: Decodable { let id: String? }
+
 private struct DrivePermissionList: Decodable {
     struct Permission: Decodable {
         let id: String?
@@ -602,6 +976,7 @@ struct GogGmail: AsyncParsableCommand {
         abstract: "Gmail.",
         subcommands: [
             GmailMessages.self, GmailGet.self, GmailSend.self, GmailLabels.self,
+            GmailModify.self, GmailTrash.self, GmailUntrash.self,
             GmailDrafts.self, GmailDraft.self,
             GmailThreads.self, GmailThreadGet.self,
             GmailAttachments.self, GmailAttachment.self,
@@ -851,13 +1226,21 @@ struct GmailDraft: AsyncParsableCommand {
     @Option(name: .long, help: "Subject line.") var subject: String = ""
     @Option(name: [.customShort("b"), .long], help: "Message body (plain text).")
     var body: String = ""
+    @Flag(name: .long, help: "Build the request but do not create the draft.")
+    var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit the raw draft result JSON.")
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let mimeData = try plainTextMIME(to: to, subject: subject, body: body)
         let payload = try JSONEncoder().encode(
             ["message": ["raw": mimeData.base64URLEncodedString()]])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating draft\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
         let url = try googleURL("https://gmail.googleapis.com/gmail/v1/users/me/drafts")
         let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
         if json {
@@ -1053,6 +1436,110 @@ struct GmailAttachment: AsyncParsableCommand {
     }
 }
 
+/// `gog gmail modify <id>` — add/remove labels on a message (e.g. mark read by
+/// removing UNREAD, star by adding STARRED). Takes label *IDs*, not names —
+/// look them up with `gog gmail labels`.
+struct GmailModify: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "modify",
+        abstract: "Add/remove a message's labels by ID (--dry-run to preview).")
+
+    @Argument(help: "Gmail message ID.") var id: String
+    @Option(name: .long, help: "Label ID to add (repeatable, e.g. STARRED).")
+    var addLabel: [String] = []
+    @Option(name: .long, help: "Label ID to remove (repeatable, e.g. UNREAD).")
+    var removeLabel: [String] = []
+    @Flag(name: .long, help: "Build the request but do not modify the message.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard !addLabel.isEmpty || !removeLabel.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: gmail modify needs at least one --add-label or "
+                    + "--remove-label (label IDs from `gog gmail labels`)\n")
+            throw ExitCode(2)
+        }
+        // Adding TRASH or SPAM is destructive (equivalent to `gmail trash`), so
+        // require the .full tier even though ordinary label edits are .edit.
+        if addLabel.contains(where: { ["TRASH", "SPAM"].contains($0.uppercased()) }) {
+            try requireWriteTier(.full)
+        }
+        struct ModifyBody: Encodable {
+            let addLabelIds: [String]
+            let removeLabelIds: [String]
+        }
+        let payload = try JSONEncoder().encode(
+            ModifyBody(addLabelIds: addLabel, removeLabelIds: removeLabel))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not modifying\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            id: "\(id)/modify")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("modified: \(id)\n")
+    }
+}
+
+/// `gog gmail trash <id>` — move a message to Trash (reversible via untrash).
+struct GmailTrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "trash",
+        abstract: "Move a message to Trash (--dry-run to preview).")
+
+    @Argument(help: "Gmail message ID.") var id: String
+    @Flag(name: .long, help: "Show what would be trashed without trashing.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not trashing\n")
+            Shell.bashCurrent.stdout("would trash: \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            id: "\(id)/trash")
+        _ = try await GoogleHTTPClient().post(url)
+        Shell.bashCurrent.stdout("trashed: \(id)\n")
+    }
+}
+
+/// `gog gmail untrash <id>` — restore a message from Trash.
+struct GmailUntrash: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "untrash",
+        abstract: "Restore a message from Trash (--dry-run to preview).")
+
+    @Argument(help: "Gmail message ID.") var id: String
+    @Flag(name: .long, help: "Show what would be restored without restoring.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not untrashing\n")
+            Shell.bashCurrent.stdout("would untrash: \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            id: "\(id)/untrash")
+        _ = try await GoogleHTTPClient().post(url)
+        Shell.bashCurrent.stdout("untrashed: \(id)\n")
+    }
+}
+
 private struct GmailDraftList: Decodable {
     struct Draft: Decodable {
         struct Msg: Decodable { let id: String?; let threadId: String? }
@@ -1103,6 +1590,7 @@ struct GogCalendar: AsyncParsableCommand {
         abstract: "Google Calendar.",
         subcommands: [
             CalendarEvents.self, CalendarGet.self, CalendarCreate.self,
+            CalendarUpdate.self, CalendarDelete.self,
             CalendarCalendars.self, CalendarFreeBusy.self,
         ],
         aliases: ["cal"])
@@ -1234,6 +1722,7 @@ struct CalendarCreate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         struct NewEvent: Encodable {
             struct When: Encodable { let dateTime: String }
             let summary: String
@@ -1256,6 +1745,83 @@ struct CalendarCreate: AsyncParsableCommand {
         }
         let event = try JSONDecoder().decode(CalEvent.self, from: result)
         Shell.bashCurrent.stdout("created: \(event.id ?? "")\n")
+    }
+}
+
+/// `gog calendar update <eventId>` — patch summary/start/end on an event.
+struct CalendarUpdate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Update fields on a calendar event (--dry-run to preview).")
+
+    @Argument(help: "Event ID.") var id: String
+    @Option(name: .long, help: "New event title.") var summary: String?
+    @Option(name: .long, help: "New start time (RFC3339).") var start: String?
+    @Option(name: .long, help: "New end time (RFC3339).") var end: String?
+    @Flag(name: .long, help: "Build the request but do not update the event.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        struct EventPatch: Encodable {
+            struct When: Encodable { let dateTime: String }
+            let summary: String?
+            let start: When?
+            let end: When?
+        }
+        // PATCH is a merge — only the provided fields are sent. Require at least
+        // one so an empty update can't silently no-op.
+        guard summary != nil || start != nil || end != nil else {
+            Shell.bashCurrent.stderr(
+                "gog: calendar update needs at least one of "
+                    + "--summary, --start, --end\n")
+            throw ExitCode(2)
+        }
+        let payload = try JSONEncoder().encode(EventPatch(
+            summary: summary,
+            start: start.map { EventPatch.When(dateTime: $0) },
+            end: end.map { EventPatch.When(dateTime: $0) }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not updating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events", id: id)
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let event = try JSONDecoder().decode(CalEvent.self, from: result)
+        Shell.bashCurrent.stdout("updated: \(event.id ?? id)\n")
+    }
+}
+
+/// `gog calendar delete <eventId>` — remove an event from the primary calendar.
+struct CalendarDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete a calendar event (--dry-run to preview).",
+        aliases: ["rm"])
+
+    @Argument(help: "Event ID.") var id: String
+    @Flag(name: .long, help: "Show what would be deleted without deleting.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete: \(id)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events", id: id)
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("deleted: \(id)\n")
     }
 }
 
@@ -1456,6 +2022,7 @@ struct GogContacts: AsyncParsableCommand {
         subcommands: [
             ContactsList.self, ContactsGet.self,
             ContactsSearch.self, ContactsOther.self,
+            ContactsCreate.self, ContactsUpdate.self, ContactsDelete.self,
         ],
         aliases: ["contact"])
 }
@@ -1547,6 +2114,250 @@ private struct Contact: Decodable {
     let resourceName: String?
     let names: [Name]?
     let emailAddresses: [Email]?
+}
+
+/// The writable subset of a People `Person`. `updateContact` rejects a write
+/// that doesn't echo back the contact's current `etag` *and* `metadata.sources`
+/// (mirrors gogcli, which reads the person then sends it straight back), so both
+/// ride along; all optionals are omitted when nil, so the same type serves
+/// create (neither) and update (both + only the changed fields).
+private struct ContactWrite: Encodable {
+    struct Name: Encodable {
+        let givenName: String?
+        let familyName: String?
+        let middleName: String?
+        let honorificPrefix: String?
+        let honorificSuffix: String?
+        let phoneticGivenName: String?
+        let phoneticMiddleName: String?
+        let phoneticFamilyName: String?
+        let phoneticHonorificPrefix: String?
+        let phoneticHonorificSuffix: String?
+        // Defaults so `create` (given/family only) stays a two-arg call while
+        // `update` can carry forward every component it read back.
+        init(givenName: String?, familyName: String?,
+             middleName: String? = nil, honorificPrefix: String? = nil,
+             honorificSuffix: String? = nil, phoneticGivenName: String? = nil,
+             phoneticMiddleName: String? = nil, phoneticFamilyName: String? = nil,
+             phoneticHonorificPrefix: String? = nil,
+             phoneticHonorificSuffix: String? = nil) {
+            self.givenName = givenName
+            self.familyName = familyName
+            self.middleName = middleName
+            self.honorificPrefix = honorificPrefix
+            self.honorificSuffix = honorificSuffix
+            self.phoneticGivenName = phoneticGivenName
+            self.phoneticMiddleName = phoneticMiddleName
+            self.phoneticFamilyName = phoneticFamilyName
+            self.phoneticHonorificPrefix = phoneticHonorificPrefix
+            self.phoneticHonorificSuffix = phoneticHonorificSuffix
+        }
+    }
+    struct Value: Encodable { let value: String }
+    let etag: String?
+    let metadata: ContactMetadata?
+    let names: [Name]?
+    let emailAddresses: [Value]?
+    let phoneNumbers: [Value]?
+}
+
+/// A contact's source metadata: read from `people.get` and echoed back on
+/// `updateContact` (the API 400s without it). `Codable` so it round-trips.
+private struct ContactMetadata: Codable {
+    struct Source: Codable { let type: String?; let id: String?; let etag: String? }
+    let sources: [Source]?
+}
+private struct ContactReadback: Decodable {
+    struct Name: Decodable {
+        let givenName: String?
+        let familyName: String?
+        let middleName: String?
+        let honorificPrefix: String?
+        let honorificSuffix: String?
+        let phoneticGivenName: String?
+        let phoneticMiddleName: String?
+        let phoneticFamilyName: String?
+        let phoneticHonorificPrefix: String?
+        let phoneticHonorificSuffix: String?
+    }
+    let etag: String?
+    let metadata: ContactMetadata?
+    let names: [Name]?
+}
+
+/// `gog contacts create --given … [--family …] [--email …] [--phone …]` — create
+/// a contact. Names are structured (given/family), matching gogcli.
+struct ContactsCreate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a contact (--dry-run to preview).")
+
+    @Option(name: .long, help: "Given (first) name. Required.") var given: String?
+    @Option(name: .long, help: "Family (last) name.") var family: String?
+    @Option(name: .long, help: "Email address (repeatable).") var email: [String] = []
+    @Option(name: .long, help: "Phone number (repeatable).") var phone: [String] = []
+    @Flag(name: .long, help: "Build the request but do not create.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        let givenName = (given ?? "").trimmingCharacters(in: .whitespaces)
+        guard !givenName.isEmpty else {
+            Shell.bashCurrent.stderr("gog: contacts create requires --given\n")
+            throw ExitCode(2)
+        }
+        let payload = try JSONEncoder().encode(ContactWrite(
+            etag: nil,
+            metadata: nil,
+            names: [ContactWrite.Name(
+                givenName: givenName,
+                familyName: family?.trimmingCharacters(in: .whitespaces))],
+            emailAddresses: email.isEmpty
+                ? nil : email.map { ContactWrite.Value(value: $0) },
+            phoneNumbers: phone.isEmpty
+                ? nil : phone.map { ContactWrite.Value(value: $0) }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        // createContact takes no personFields (gogcli omits it; it isn't required).
+        let url = URL(string:
+            "https://people.googleapis.com/v1/people:createContact")!
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let person = try JSONDecoder().decode(Contact.self, from: result)
+        Shell.bashCurrent.stdout("created: \(person.resourceName ?? "")\n")
+    }
+}
+
+/// `gog contacts update <resourceName> …` — replace a contact's name/emails/
+/// phones. People's `updateContact` requires the current etag *and*
+/// metadata.sources, so we read the person first, then PATCH it back with only
+/// the fields named on the command line.
+struct ContactsUpdate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Update a contact's fields (--dry-run to preview).")
+
+    @Argument(help: "Contact resource name, e.g. people/c123.")
+    var resourceName: String
+    @Option(name: .long, help: "New given (first) name.") var given: String?
+    @Option(name: .long, help: "New family (last) name.") var family: String?
+    @Option(name: .long, help: "Replace emails (repeatable).") var email: [String] = []
+    @Option(name: .long, help: "Replace phone numbers (repeatable).")
+    var phone: [String] = []
+    @Flag(name: .long, help: "Build the request but do not update.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        let updatingName = given != nil || family != nil
+        var fields: [String] = []
+        if updatingName { fields.append("names") }
+        if !email.isEmpty { fields.append("emailAddresses") }
+        if !phone.isEmpty { fields.append("phoneNumbers") }
+        guard !fields.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: contacts update needs at least one of "
+                    + "--given, --family, --email, --phone\n")
+            throw ExitCode(2)
+        }
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not updating\n")
+            Shell.bashCurrent.stdout(
+                "would update \(resourceName): \(fields.joined(separator: ","))\n")
+            return
+        }
+        // updateContact rejects a write that doesn't carry the contact's current
+        // etag AND metadata.sources, so read both (like gogcli's read-modify-
+        // write) and send them back with only the changed fields.
+        let getURL = try googleURL(
+            "https://people.googleapis.com/v1", id: resourceName,
+            query: [URLQueryItem(
+                name: "personFields",
+                value: fields.joined(separator: ",") + ",metadata"),
+                // Read only the contact's own data: a contact linked to a Google
+                // profile otherwise returns the PROFILE name too (often first),
+                // which the names.first merge below would graft onto the contact.
+                URLQueryItem(name: "sources", value: "READ_SOURCE_TYPE_CONTACT")])
+        let current = try JSONDecoder().decode(
+            ContactReadback.self, from: try await GoogleHTTPClient().get(getURL))
+        // Override only the provided name part, preserving the other (gogcli).
+        let names: [ContactWrite.Name]?
+        if updatingName {
+            let cur = current.names?.first
+            // Overwrite only the requested part; carry every other component
+            // forward so updatePersonFields=names doesn't silently drop them.
+            names = [ContactWrite.Name(
+                givenName: given?.trimmingCharacters(in: .whitespaces) ?? cur?.givenName,
+                familyName: family?.trimmingCharacters(in: .whitespaces) ?? cur?.familyName,
+                middleName: cur?.middleName,
+                honorificPrefix: cur?.honorificPrefix,
+                honorificSuffix: cur?.honorificSuffix,
+                phoneticGivenName: cur?.phoneticGivenName,
+                phoneticMiddleName: cur?.phoneticMiddleName,
+                phoneticFamilyName: cur?.phoneticFamilyName,
+                phoneticHonorificPrefix: cur?.phoneticHonorificPrefix,
+                phoneticHonorificSuffix: cur?.phoneticHonorificSuffix)]
+        } else {
+            names = nil
+        }
+        let payload = try JSONEncoder().encode(ContactWrite(
+            etag: current.etag,
+            metadata: current.metadata,
+            names: names,
+            emailAddresses: email.isEmpty
+                ? nil : email.map { ContactWrite.Value(value: $0) },
+            phoneNumbers: phone.isEmpty
+                ? nil : phone.map { ContactWrite.Value(value: $0) }))
+        let url = try googleURL(
+            "https://people.googleapis.com/v1",
+            id: "\(resourceName):updateContact",
+            query: [URLQueryItem(name: "updatePersonFields",
+                                 value: fields.joined(separator: ","))])
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let person = try JSONDecoder().decode(Contact.self, from: result)
+        Shell.bashCurrent.stdout("updated: \(person.resourceName ?? resourceName)\n")
+    }
+}
+
+/// `gog contacts delete <resourceName>` — delete a contact.
+struct ContactsDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete a contact (--dry-run to preview).",
+        aliases: ["rm"])
+
+    @Argument(help: "Contact resource name, e.g. people/c123.")
+    var resourceName: String
+    @Flag(name: .long, help: "Show what would be deleted without deleting.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete: \(resourceName)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://people.googleapis.com/v1",
+            id: "\(resourceName):deleteContact")
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("deleted: \(resourceName)\n")
+    }
 }
 
 /// `gog contacts search <query>` — search your contacts (People searchContacts).
@@ -1667,7 +2478,10 @@ struct GogTasks: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tasks",
         abstract: "Google Tasks.",
-        subcommands: [TasksLists.self, TasksList.self, TasksAdd.self],
+        subcommands: [
+            TasksLists.self, TasksList.self, TasksAdd.self,
+            TasksComplete.self, TasksDelete.self,
+        ],
         aliases: ["task"])
 }
 
@@ -1769,6 +2583,7 @@ struct TasksAdd: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         let payload = try JSONEncoder().encode(["title": title])
         let url = try googleURL(
             "https://tasks.googleapis.com/tasks/v1/lists", id: "\(list)/tasks")
@@ -1779,6 +2594,71 @@ struct TasksAdd: AsyncParsableCommand {
         }
         let task = try JSONDecoder().decode(TaskItem.self, from: result)
         Shell.bashCurrent.stdout("added: \(task.id ?? "")\n")
+    }
+}
+
+/// `gog tasks complete <taskId>` — mark a task completed.
+struct TasksComplete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "complete",
+        abstract: "Mark a task completed (--dry-run to preview).",
+        aliases: ["done"])
+
+    @Argument(help: "Task ID.") var task: String
+    @Option(name: .long, help: "Task list ID (default: @default).")
+    var list: String = "@default"
+    @Flag(name: .long, help: "Show what would change without writing.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        // Setting status=completed; Google fills in the `completed` timestamp.
+        let payload = try JSONEncoder().encode(["status": "completed"])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not completing\n")
+            Shell.bashCurrent.stdout("would complete: \(task)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://tasks.googleapis.com/tasks/v1/lists",
+            id: "\(list)/tasks/\(task)")
+        let result = try await GoogleHTTPClient().patch(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let item = try JSONDecoder().decode(TaskItem.self, from: result)
+        Shell.bashCurrent.stdout("completed: \(item.id ?? task)\n")
+    }
+}
+
+/// `gog tasks delete <taskId>` — remove a task from a list.
+struct TasksDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete a task (--dry-run to preview).",
+        aliases: ["rm"])
+
+    @Argument(help: "Task ID.") var task: String
+    @Option(name: .long, help: "Task list ID (default: @default).")
+    var list: String = "@default"
+    @Flag(name: .long, help: "Show what would be deleted without deleting.")
+    var dryRun: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not deleting\n")
+            Shell.bashCurrent.stdout("would delete: \(task)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://tasks.googleapis.com/tasks/v1/lists",
+            id: "\(list)/tasks/\(task)")
+        _ = try await GoogleHTTPClient().delete(url)
+        Shell.bashCurrent.stdout("deleted: \(task)\n")
     }
 }
 
@@ -1863,7 +2743,9 @@ struct GogSheets: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sheets",
         abstract: "Google Sheets.",
-        subcommands: [SheetsGet.self, SheetsUpdate.self],
+        subcommands: [
+            SheetsGet.self, SheetsUpdate.self, SheetsAppend.self, SheetsClear.self,
+        ],
         aliases: ["sheet"])
 }
 
@@ -1980,6 +2862,7 @@ struct SheetsUpdate: AsyncParsableCommand {
     var json: Bool = false
 
     func run() async throws {
+        try requireWriteTier(.edit)
         guard let valuesData = valuesJson.data(using: .utf8),
               let values = try? JSONDecoder().decode([[CellValue]].self, from: valuesData)
         else {
@@ -2006,6 +2889,97 @@ struct SheetsUpdate: AsyncParsableCommand {
         Shell.bashCurrent.stdout("updated \(updated.updatedCells ?? 0) cells\n")
     }
 }
+
+/// `gog sheets append <id> <range> --values-json …` — append rows after the
+/// table that overlaps the range (Sheets `values.append`).
+struct SheetsAppend: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "append",
+        abstract: "Append rows after a range's table (--dry-run to preview).")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range locating the table, e.g. Sheet1!A1.") var range: String
+    @Option(name: .long, help: #"Values as JSON rows, e.g. '[["a","b"],["c"]]'."#)
+    var valuesJson: String
+    @Flag(name: .long, help: "Build the request but do not append.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard let valuesData = valuesJson.data(using: .utf8),
+              let values = try? JSONDecoder().decode([[CellValue]].self, from: valuesData)
+        else {
+            Shell.bashCurrent.stderr(
+                #"gog: --values-json must be a JSON array of rows, e.g. '[["a","b"]]'"#
+                    + "\n")
+            throw ExitCode(2)
+        }
+        struct AppendBody: Encodable { let values: [[CellValue]] }
+        let payload = try JSONEncoder().encode(AppendBody(values: values))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not appending\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        // values.append is a custom method: the ":append" suffix sits after the
+        // (percent-encoded) range in the path. USER_ENTERED matches `update`.
+        let url = try googleURL(
+            "https://sheets.googleapis.com/v4/spreadsheets/\(pathSegment(spreadsheetId))"
+                + "/values/\(pathSegment(range)):append",
+            query: [
+                URLQueryItem(name: "valueInputOption", value: "USER_ENTERED"),
+                URLQueryItem(name: "insertDataOption", value: "INSERT_ROWS"),
+            ])
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let res = try JSONDecoder().decode(AppendResult.self, from: result)
+        Shell.bashCurrent.stdout("appended: \(res.updates?.updatedRange ?? range)\n")
+    }
+}
+
+/// `gog sheets clear <id> <range>` — clear a range's values (keeps formatting).
+struct SheetsClear: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear",
+        abstract: "Clear values from an A1 range (--dry-run to preview).")
+
+    @Argument(help: "Spreadsheet ID.") var spreadsheetId: String
+    @Argument(help: "A1 range, e.g. Sheet1!A1:D20.") var range: String
+    @Flag(name: .long, help: "Show what would be cleared without clearing.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.full)
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not clearing\n")
+            Shell.bashCurrent.stdout("would clear: \(range)\n")
+            return
+        }
+        let url = try googleURL(
+            "https://sheets.googleapis.com/v4/spreadsheets/\(pathSegment(spreadsheetId))"
+                + "/values/\(pathSegment(range)):clear")
+        let result = try await GoogleHTTPClient().post(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        let res = try JSONDecoder().decode(ClearResult.self, from: result)
+        Shell.bashCurrent.stdout("cleared: \(res.clearedRange ?? range)\n")
+    }
+}
+
+private struct AppendResult: Decodable {
+    struct Updates: Decodable { let updatedRange: String?; let updatedCells: Int? }
+    let updates: Updates?
+}
+private struct ClearResult: Decodable { let clearedRange: String? }
 
 /// A spreadsheet cell value — string, number, bool, or empty — so mixed-type
 /// ranges decode and round-trip through `--values-json` cleanly.

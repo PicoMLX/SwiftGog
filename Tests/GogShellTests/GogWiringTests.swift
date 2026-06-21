@@ -29,21 +29,51 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
     let response: HTTPResponse
     var lastURL: URL?
     var lastBody: Data?
+    var lastMethod: String?
     var urls: [URL] = []
     init(response: HTTPResponse) { self.response = response }
     func send(method: String, url: URL,
               headers: [String: String], body: Data?) async throws -> HTTPResponse {
         lastURL = url
         lastBody = body
+        lastMethod = method
         urls.append(url)
         return response
     }
 }
 
+/// Binds a host `GogWriteTier` around each test in the suite, so the gated write
+/// commands execute under test without per-test policy plumbing. Tests that
+/// verify the gate itself re-bind a lower tier inline (the inner bind wins).
+struct WriteTierTrait: SuiteTrait, TestTrait {
+    let tier: GogWriteTier
+    func scopeProvider(for test: Test, testCase: Test.Case?) -> Scope? {
+        Scope(tier: tier)
+    }
+    struct Scope: TestScoping {
+        let tier: GogWriteTier
+        func provideScope(
+            for test: Test, testCase: Test.Case?,
+            performing function: @Sendable () async throws -> Void
+        ) async throws {
+            try await GogPolicies.$current.withValue(GogPolicy(writeTier: tier)) {
+                try await function()
+            }
+        }
+    }
+}
+
+extension Trait where Self == WriteTierTrait {
+    /// Bind a host write tier for the annotated suite/test.
+    static func writeTier(_ tier: GogWriteTier) -> Self { WriteTierTrait(tier: tier) }
+}
+
 /// Wiring + behaviour tests: `gog` registered into a sandboxed `Shell` and run
 /// through `runCapturing`. Covers the fail-closed sandbox contracts (deny
 /// paths) and command happy paths via an injected fake `GogTransport`.
-@Suite struct GogWiringTests {
+/// Runs at the `.full` write tier so the gated write commands execute; the
+/// dedicated gate tests re-bind a lower tier inline to prove the gate blocks.
+@Suite(.writeTier(.full)) struct GogWiringTests {
 
     @Test func versionRunsThroughTheShell() async throws {
         let shell = Shell()
@@ -1055,6 +1085,877 @@ private final class RecordingTransport: GogTransport, @unchecked Sendable {
         }
         #expect(run.exitStatus == ExitStatus(1))
         #expect(run.stderr.contains("team@x.com: notFound"))
+    }
+
+    // MARK: - Writes: Calendar update / delete
+
+    @Test func calendarUpdateRequiresAField() async throws {
+        // PATCH with nothing to change is a no-op mistake — reject pre-network.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog calendar update E1")
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("at least one of"))
+    }
+
+    @Test func calendarUpdateDryRunDoesNotWrite() async throws {
+        // Validation + payload build precede any network, so no transport needed.
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing(
+                "gog calendar update E1 --summary Renamed --dry-run")
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not updating"))
+        #expect(run.stdout.contains("Renamed"))
+    }
+
+    @Test func calendarUpdatePatchesAndEmitsId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"E1","summary":"Renamed"}"#.utf8)))
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog calendar update E1 --summary Renamed")
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("updated: E1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/events/E1") == true)
+    }
+
+    @Test func calendarDeleteDryRunDoesNotDelete() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .full)) {
+            try await shell.runCapturing("gog calendar delete E1 --dry-run")
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not deleting"))
+        #expect(run.stdout.contains("would delete: E1"))
+    }
+
+    @Test func calendarDeleteSendsDeleteAndConfirms() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 204, body: Data()))
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .full)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog calendar delete E1")
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("deleted: E1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/events/E1") == true)
+    }
+
+    // MARK: - Writes: Tasks complete / delete
+
+    @Test func tasksCompleteDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog tasks complete T1 --dry-run")
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not completing"))
+        #expect(run.stdout.contains("would complete: T1"))
+    }
+
+    @Test func tasksCompletePatchesStatusAndEmitsId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"T1","status":"completed"}"#.utf8)))
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog tasks complete T1")
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("completed: T1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(transport.lastURL?.absoluteString.contains("/@default/tasks/T1") == true)
+        // The PATCH body flips status to completed.
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("completed"))
+    }
+
+    @Test func tasksDeleteSendsDeleteToListPath() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 204, body: Data()))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog tasks delete T1 --list L9")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("deleted: T1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.contains("/lists/L9/tasks/T1") == true)
+    }
+
+    // MARK: - Writes: Gmail modify / trash / untrash
+
+    @Test func gmailModifyRequiresALabel() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog gmail modify M1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--add-label"))
+    }
+
+    @Test func gmailModifyDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog gmail modify M1 --remove-label UNREAD --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not modifying"))
+        #expect(run.stdout.contains("UNREAD"))
+    }
+
+    @Test func gmailModifyPostsToModifyEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"M1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog gmail modify M1 --add-label STARRED --remove-label UNREAD")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("modified: M1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/messages/M1/modify") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("addLabelIds") && body.contains("STARRED"))
+        #expect(body.contains("removeLabelIds") && body.contains("UNREAD"))
+    }
+
+    @Test func gmailTrashDryRunDoesNotTrash() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog gmail trash M1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not trashing"))
+        #expect(run.stdout.contains("would trash: M1"))
+    }
+
+    @Test func gmailTrashPostsToTrashEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"M1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail trash M1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("trashed: M1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/messages/M1/trash") == true)
+    }
+
+    @Test func gmailUntrashPostsToUntrashEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"M1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog gmail untrash M1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("untrashed: M1"))
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/messages/M1/untrash") == true)
+    }
+
+    // MARK: - Writes: Drive trash / untrash / rename / mkdir
+
+    @Test func driveTrashDryRunDoesNotTrash() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive trash F1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not trashing"))
+        #expect(run.stdout.contains("would trash: F1"))
+    }
+
+    @Test func driveTrashPatchesTrashedTrue() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"F1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive trash F1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("trashed: F1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1") == true)
+        #expect(transport.lastURL?.absoluteString.contains("supportsAllDrives=true") == true)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#""trashed":true"#))
+    }
+
+    @Test func driveUntrashPatchesTrashedFalse() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"F1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive untrash F1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("untrashed: F1"))
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#""trashed":false"#))
+    }
+
+    @Test func driveRenameDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive rename F1 --name Renamed.txt --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not renaming"))
+        #expect(run.stdout.contains("Renamed.txt"))
+    }
+
+    @Test func driveRenamePatchesName() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"F1","name":"Renamed.txt"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive rename F1 --name Renamed.txt")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("renamed: F1"))
+        #expect(transport.lastMethod == "PATCH")
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("Renamed.txt"))
+    }
+
+    @Test func driveMkdirDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive mkdir Reports --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not creating folder"))
+        #expect(run.stdout.contains("vnd.google-apps.folder"))
+    }
+
+    @Test func driveMkdirPostsFolderUnderParent() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"D9","name":"Reports"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mkdir Reports --parent P1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("created folder: D9"))
+        #expect(transport.lastMethod == "POST")
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("vnd.google-apps.folder"))
+        #expect(body.contains("P1"))
+    }
+
+    // MARK: - Writes: Drive cp / mv / share / unshare
+
+    @Test func driveCopyDryRunDoesNotCopy() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive cp F1 --name Clone.txt --parent P1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not copying"))
+        #expect(run.stdout.contains("Clone.txt") && run.stdout.contains("P1"))
+    }
+
+    @Test func driveCopyPostsToCopyEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"F2","name":"Clone.txt"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive cp F1 --name Clone.txt")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("copied: F2"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1/copy") == true)
+    }
+
+    @Test func driveMovePatchesParentsWithExplicitFrom() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"F1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mv F1 --to NEW --from OLD")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("moved: F1 -> NEW"))
+        #expect(transport.lastMethod == "PATCH")
+        // Single call: no parent lookup when --from is given.
+        #expect(transport.urls.count == 1)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("addParents=NEW") && url.contains("removeParents=OLD"))
+    }
+
+    @Test func driveMoveLooksUpParentsWhenFromOmitted() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // First call (GET fields=parents) and the PATCH both see this response;
+        // the GET decode yields the old parent to remove.
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"parents":["OLD"]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mv F1 --to NEW")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.urls.count == 2)            // lookup, then move
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("addParents=NEW") && url.contains("removeParents=OLD"))
+    }
+
+    @Test func driveMoveDropsDestinationFromRemovedParents() async throws {
+        // File already under NEW: must not send removeParents=NEW alongside
+        // addParents=NEW (an ambiguous parent mutation Drive can reject).
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"parents":["NEW"]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive mv F1 --to NEW")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains("addParents=NEW"))
+        #expect(!url.contains("removeParents"))
+    }
+
+    @Test func driveShareRequiresEmailOrAnyone() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog drive share F1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("exactly one"))
+    }
+
+    @Test func driveShareRejectsBadRole() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive share F1 --email a@b.com --role admin")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("reader, writer, or commenter"))
+    }
+
+    @Test func driveSharePostsUserPermission() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog drive share F1 --email a@b.com --role writer")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("shared: PERM1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1/permissions") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("\"type\":\"user\""))
+        #expect(body.contains("writer") && body.contains("a@b.com"))
+    }
+
+    @Test func driveShareAnyoneUsesAnyoneType() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM2"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share F1 --anyone")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("\"type\":\"anyone\""))
+    }
+
+    @Test func driveUnshareDeletesPermission() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 204, body: Data()))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive unshare F1 --permission P1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("revoked: P1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.contains("/files/F1/permissions/P1") == true)
+    }
+
+    // MARK: - Writes: Sheets append / clear
+
+    @Test func sheetsAppendDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets append S1 'Sheet1!A1' --values-json '[[\"x\",\"y\"]]' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not appending"))
+        #expect(run.stdout.contains("\"x\"") && run.stdout.contains("\"y\""))
+    }
+
+    @Test func sheetsAppendRejectsBadJson() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog sheets append S1 'Sheet1!A1' --values-json notjson")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("JSON array of rows"))
+    }
+
+    @Test func sheetsAppendPostsToAppendEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"updates":{"updatedRange":"Sheet1!A2:B2","updatedCells":2}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog sheets append S1 'Sheet1!A1' --values-json '[[\"x\",\"y\"]]'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("appended: Sheet1!A2:B2"))
+        #expect(transport.lastMethod == "POST")
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains(":append"))
+        #expect(url.contains("valueInputOption=USER_ENTERED"))
+    }
+
+    @Test func sheetsClearDryRunDoesNotClear() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog sheets clear S1 'Sheet1!A1:D9' --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not clearing"))
+        #expect(run.stdout.contains("would clear: Sheet1!A1:D9"))
+    }
+
+    @Test func sheetsClearPostsToClearEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"clearedRange":"Sheet1!A1:D9"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog sheets clear S1 'Sheet1!A1:D9'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("cleared: Sheet1!A1:D9"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains(":clear") == true)
+    }
+
+    // MARK: - Writes: Contacts create / update / delete
+
+    @Test func contactsCreateRequiresAField() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog contacts create")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("requires --given"))
+    }
+
+    @Test func contactsCreateDryRunDoesNotWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog contacts create --given Jane --family Doe --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not creating"))
+        #expect(run.stdout.contains("givenName") && run.stdout.contains("Jane"))
+        #expect(run.stdout.contains("familyName") && run.stdout.contains("Doe"))
+    }
+
+    @Test func contactsCreatePostsToCreateContact() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"resourceName":"people/c1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog contacts create --given Jane --family Doe --email jane@x.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("created: people/c1"))
+        #expect(transport.lastMethod == "POST")
+        // create takes no personFields query (matches gogcli).
+        #expect(transport.lastURL?.absoluteString.hasSuffix("people:createContact") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("givenName") && body.contains("Jane"))
+        #expect(body.contains("familyName") && body.contains("Doe"))
+        #expect(body.contains("jane@x.com"))
+    }
+
+    @Test func contactsUpdateRequiresAField() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog contacts update people/c1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--given, --family, --email, --phone"))
+    }
+
+    @Test func contactsUpdateReadsEtagThenPatches() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Both the GET (etag + metadata.sources lookup) and the PATCH see this
+        // response; the GET decode supplies the etag and source metadata the
+        // PATCH body must echo back — updateContact 400s without them.
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(
+                #"{"resourceName":"people/c1","etag":"ETAG1","names":[{"givenName":"Old","familyName":"Doe"}],"metadata":{"sources":[{"type":"CONTACT","id":"src1","etag":"SRCE"}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog contacts update people/c1 --given Jane")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("updated: people/c1"))
+        #expect(transport.urls.count == 2)            // get (etag+metadata), then patch
+        #expect(transport.lastMethod == "PATCH")
+        // The read mask asks for metadata so the sources come back.
+        #expect(transport.urls.first?.absoluteString.contains("metadata") == true)
+        let url = transport.lastURL?.absoluteString ?? ""
+        #expect(url.contains(":updateContact") && url.contains("updatePersonFields=names"))
+        // The PATCH body echoes etag + metadata.sources, sets the new given name,
+        // and preserves the family name that wasn't passed.
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("ETAG1") && body.contains("\"givenName\":\"Jane\""))
+        #expect(body.contains("\"familyName\":\"Doe\""))
+        #expect(body.contains("sources") && body.contains("SRCE"))
+    }
+
+    @Test func contactsDeleteDryRunDoesNotDelete() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog contacts delete people/c1 --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not deleting"))
+        #expect(run.stdout.contains("would delete: people/c1"))
+    }
+
+    @Test func contactsDeleteCallsDeleteContact() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts delete people/c1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("deleted: people/c1"))
+        #expect(transport.lastMethod == "DELETE")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("people/c1:deleteContact") == true)
+    }
+
+    @Test func driveShareGroupUsesGroupType() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM3"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog drive share F1 --email team@x.com --type group")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("\"type\":\"group\""))
+    }
+
+    @Test func driveShareRejectsBadType() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog drive share F1 --email a@b.com --type domain")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--type must be user or group"))
+    }
+
+    @Test func driveShareEncodesFileIdAsSingleSegment() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"PERM4"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share 'a/b' --email x@y.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        // The file id is encoded as one path segment, not split by its slash.
+        #expect(transport.lastURL?.absoluteString.contains("/files/a%2Fb/permissions") == true)
+    }
+
+    // MARK: - Write-tier gate (host-only policy)
+
+    @Test func readOnlyTierBlocksAnyWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Re-bind read-only, overriding the suite's .full.
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(writeTier: .readOnly)
+        ) { try await shell.runCapturing("gog tasks complete T1") }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("read-only by default"))
+    }
+
+    @Test func editTierBlocksDestructiveWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // .edit is not enough for a .full (destructive) op like drive trash.
+        let run = try await GogPolicies.$current.withValue(
+            GogPolicy(writeTier: .edit)
+        ) { try await shell.runCapturing("gog drive trash F1") }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
+    }
+
+    @Test func editTierAllowsAdditiveWrite() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"id":"T1","status":"completed"}"#.utf8)))
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await GogTransportProvider.$current.withValue(transport) {
+                try await GogCredentials.$current.withValue(
+                    StubProvider(token: "t", accountHint: nil)
+                ) {
+                    try await shell.runCapturing("gog tasks complete T1")
+                }
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("completed: T1"))
+    }
+
+    @Test func gmailModifyTrashLabelNeedsFullTier() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Adding TRASH is destructive (like `gmail trash`): .edit must refuse.
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog gmail modify M1 --add-label TRASH")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
+    }
+
+    @Test func driveShareDefaultsToNoNotificationEmail() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"P1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share F1 --email a@b.com")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastURL?.absoluteString.contains("sendNotificationEmail=false")
+            == true)
+    }
+
+    @Test func driveShareNotifyEnablesNotificationEmail() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"id":"P1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog drive share F1 --email a@b.com --notify")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastURL?.absoluteString.contains("sendNotificationEmail=true")
+            == true)
+    }
+
+    @Test func contactsUpdatePreservesUneditedNameComponents() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Readback has a middle name; updating only --given must keep it (the
+        // People API replaces the whole `names` field).
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(
+                #"{"etag":"e","names":[{"givenName":"Jo","familyName":"Lee","middleName":"Q"}]}"#
+                    .utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog contacts update people/c1 --given Joey")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("Joey"))                 // requested change applied
+        #expect(body.contains(#""middleName":"Q""#))   // unedited component kept
+        // The read is restricted to the contact's own source (not a linked
+        // profile), so the preserved base name is the contact's.
+        #expect(transport.urls.first?.absoluteString.contains("READ_SOURCE_TYPE_CONTACT")
+            == true)
+    }
+
+    @Test func driveCopyIntoParentNeedsFullTier() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A plain copy is .edit, but copying into a folder can expose the data
+        // (folder permissions propagate), so a parented copy needs .full.
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog drive cp F1 --parent SHARED")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
+    }
+
+    @Test func gmailDraftDryRunDoesNotCreate() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog gmail draft --to a@b.com --subject Hi --body Yo --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not creating draft"))
+        #expect(run.stdout.contains("message"))   // the MIME payload preview
+    }
+
+    @Test func driveUploadIntoParentNeedsFullTier() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // Uploading into a folder can expose the file, like a parented copy.
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog drive upload /gog/x.txt --parent SHARED")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {

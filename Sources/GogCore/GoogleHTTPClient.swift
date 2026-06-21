@@ -31,6 +31,14 @@ public struct GoogleHTTPClient {
         try await perform(method: "POST", url: url, body: body, contentType: contentType)
     }
 
+    /// Authenticated `POST` with no body or content type — for endpoints whose
+    /// request body Google documents as empty (e.g. Gmail trash/untrash), where
+    /// a `{}` JSON body with `Content-Type: application/json` can trip strict
+    /// gateways into a 400.
+    public func post(_ url: URL) async throws -> Data {
+        try await perform(method: "POST", url: url, body: nil, contentType: nil)
+    }
+
     /// Authenticated `PUT` with a JSON body.
     public func put(_ url: URL, jsonBody: Data) async throws -> Data {
         try await perform(method: "PUT", url: url, body: jsonBody,
