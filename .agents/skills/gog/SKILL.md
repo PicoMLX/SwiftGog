@@ -172,7 +172,7 @@ gog docs cat <documentId> --out /gog/doc.md
 gog docs create --title 'Notes'                              # edit
 gog docs append <documentId> --text 'A new paragraph.'       # edit
 gog docs find-replace <documentId> --find foo --replace bar  # edit
-gog docs clear <documentId>                                  # full (empties content, keeps the doc)
+gog docs clear <documentId>                                  # full (empties the main tab; keeps the doc)
 ```
 
 ## Sheets

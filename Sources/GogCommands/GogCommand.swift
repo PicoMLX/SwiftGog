@@ -2888,13 +2888,14 @@ private struct ReplaceAllTextBatch: Encodable {
     }
 }
 
-/// `gog docs clear <documentId>` — delete all body content from a Doc (Docs
-/// `batchUpdate` deleteContentRange). Reads the doc first to find its extent;
-/// the trailing newline at the end can't be deleted, so it always remains.
+/// `gog docs clear <documentId>` — delete the main tab's body content from a Doc
+/// (Docs `batchUpdate` deleteContentRange). Reads the doc first to find its
+/// extent; the trailing newline can't be deleted, so it remains. Targets the
+/// document's main (first) tab — other tabs in a multi-tab doc are left as-is.
 struct DocsClear: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "clear",
-        abstract: "Delete all content from a Doc (--dry-run to preview).")
+        abstract: "Clear the main tab's content of a Doc (--dry-run to preview).")
 
     @Argument(help: "Document ID.") var documentId: String
     @Flag(name: .long, help: "Build the request but do not clear.")
@@ -2906,7 +2907,7 @@ struct DocsClear: AsyncParsableCommand {
         try requireWriteTier(.full)
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not clearing\n")
-            Shell.bashCurrent.stdout("would clear all content: \(documentId)\n")
+            Shell.bashCurrent.stdout("would clear the main tab: \(documentId)\n")
             return
         }
         // deleteContentRange needs an explicit range, so read the body extent
@@ -2925,7 +2926,7 @@ struct DocsClear: AsyncParsableCommand {
             DocBody.self, from: try await GoogleHTTPClient().get(getURL))
         let end = doc.body?.content?.compactMap(\.endIndex).max() ?? 1
         guard end > 2 else {
-            Shell.bashCurrent.stdout("already empty: \(documentId)\n")
+            Shell.bashCurrent.stdout(json ? "{}\n" : "already empty: \(documentId)\n")
             return
         }
         struct Batch: Encodable {
@@ -3447,6 +3448,12 @@ struct SlidesListSlides: AsyncParsableCommand {
     @Argument(help: "Presentation ID.") var presentationId: String
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+    @OptionGroup var failEmptyFlag: FailEmptyFlag
+
+    private struct Deck: Decodable {
+        struct Slide: Decodable { let objectId: String? }
+        let slides: [Slide]?
+    }
 
     func run() async throws {
         let url = try googleURL(
@@ -3455,16 +3462,15 @@ struct SlidesListSlides: AsyncParsableCommand {
         let data = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self) + "\n")
+            if failEmptyFlag.failEmpty, jsonListingEmpty(from: data, items: \Deck.slides) {
+                throw ExitCode(3)
+            }
             return
-        }
-        struct Deck: Decodable {
-            struct Slide: Decodable { let objectId: String? }
-            let slides: [Slide]?
         }
         let ids = (try JSONDecoder().decode(Deck.self, from: data).slides ?? [])
             .compactMap(\.objectId)
         guard !ids.isEmpty else {
-            Shell.bashCurrent.stderr("no slides\n")
+            try emitEmpty("slides", failEmpty: failEmptyFlag.failEmpty)
             return
         }
         for (i, id) in ids.enumerated() {

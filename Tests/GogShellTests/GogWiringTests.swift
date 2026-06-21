@@ -2914,6 +2914,21 @@ extension Trait where Self == WriteTierTrait {
         #expect(transport.lastURL?.absoluteString.contains("/presentations/P1") == true)
     }
 
+    @Test func slidesListSlidesFailEmptyExitsThree() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"slides":[]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides list-slides P1 --fail-empty")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+    }
+
     @Test func slidesDeleteSlidePostsDeleteObject() async throws {
         let shell = Shell()
         shell.registerGogCommands()
