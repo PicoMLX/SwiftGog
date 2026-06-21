@@ -2800,7 +2800,10 @@ struct DocsAppend: AsyncParsableCommand {
             let requests: [Request]
         }
         // Lead with a newline so the text starts a new paragraph instead of
-        // gluing onto the document's existing last line.
+        // gluing onto the document's existing last line. (A brand-new empty doc
+        // thus gets a leading blank paragraph — intentional: detecting emptiness
+        // would need an extra read and would break the offline --dry-run, and
+        // appending a paragraph to an existing doc is the case worth optimizing.)
         let payload = try JSONEncoder().encode(Batch(requests: [
             .init(insertText: .init(endOfSegmentLocation: .init(), text: "\n" + text))]))
         if dryRun {
