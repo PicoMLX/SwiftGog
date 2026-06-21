@@ -739,6 +739,10 @@ struct DriveCopy: AsyncParsableCommand {
 
     func run() async throws {
         try requireWriteTier(.edit)
+        // Copying into a parent folder can expose the data: folder permissions
+        // propagate to the copy, so a shared --parent is an implicit share.
+        // Treat a parented copy as a .full (exposing) op, like `drive share`.
+        if parent != nil { try requireWriteTier(.full) }
         struct CopyBody: Encodable {
             let name: String?
             let parents: [String]?
@@ -2950,7 +2954,7 @@ struct SheetsClear: AsyncParsableCommand {
         let url = try googleURL(
             "https://sheets.googleapis.com/v4/spreadsheets/\(pathSegment(spreadsheetId))"
                 + "/values/\(pathSegment(range)):clear")
-        let result = try await GoogleHTTPClient().post(url, jsonBody: Data("{}".utf8))
+        let result = try await GoogleHTTPClient().post(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
             return

@@ -1925,6 +1925,18 @@ extension Trait where Self == WriteTierTrait {
             == true)
     }
 
+    @Test func driveCopyIntoParentNeedsFullTier() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A plain copy is .edit, but copying into a folder can expose the data
+        // (folder permissions propagate), so a parented copy needs .full.
+        let run = try await GogPolicies.$current.withValue(GogPolicy(writeTier: .edit)) {
+            try await shell.runCapturing("gog drive cp F1 --parent SHARED")
+        }
+        #expect(run.exitStatus == ExitStatus(3))
+        #expect(run.stderr.contains("write tier 'full'"))
+    }
+
     @Test func httpErrorSurfacesGoogleMessage() async throws {
         let shell = Shell()
         shell.registerGogCommands()
