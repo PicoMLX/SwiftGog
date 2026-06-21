@@ -2776,10 +2776,11 @@ struct DocsCreate: AsyncParsableCommand {
 struct DocsAppend: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "append",
-        abstract: "Append text to the end of a Doc (--dry-run to preview).")
+        abstract: "Append text as a new paragraph at the end of a Doc (--dry-run).")
 
     @Argument(help: "Document ID.") var documentId: String
-    @Option(name: [.customShort("t"), .long], help: "Text to append.") var text: String
+    @Option(name: [.customShort("t"), .long],
+            help: "Text to append (inserted as a new paragraph).") var text: String
     @Flag(name: .long, help: "Build the request but do not append.")
     var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
@@ -2798,8 +2799,10 @@ struct DocsAppend: AsyncParsableCommand {
             }
             let requests: [Request]
         }
+        // Lead with a newline so the text starts a new paragraph instead of
+        // gluing onto the document's existing last line.
         let payload = try JSONEncoder().encode(Batch(requests: [
-            .init(insertText: .init(endOfSegmentLocation: .init(), text: text))]))
+            .init(insertText: .init(endOfSegmentLocation: .init(), text: "\n" + text))]))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not appending\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")

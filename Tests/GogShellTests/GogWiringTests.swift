@@ -2715,7 +2715,8 @@ extension Trait where Self == WriteTierTrait {
         #expect(transport.lastURL?.absoluteString.contains("/documents/D1:batchUpdate") == true)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("insertText") && body.contains("endOfSegmentLocation"))
-        #expect(body.contains("Hello"))
+        // Appended text is prefixed with a newline so it lands in a new paragraph.
+        #expect(body.contains(#"\nHello"#))
     }
 
     @Test func docsFindReplaceRequiresFind() async throws {
