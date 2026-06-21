@@ -1978,6 +1978,9 @@ extension Trait where Self == WriteTierTrait {
         }
         #expect(run.exitStatus == .success)
         #expect(transport.lastMethod == "PUT")
+        // The blank value reaches the request body (not dropped before the PUT).
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#"[[""]]"#))
     }
 
     @Test func httpErrorSurfacesGoogleMessage() async throws {

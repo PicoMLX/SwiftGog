@@ -47,9 +47,10 @@ gog drive ls --max 20 --json | jq '.files[].name'
   suspend/unsuspend and member-add/remove are **off by default** (domain-wide
   blast radius) until the host enables admin writes. These are independent of the
   write tier above.
-- **Preview any write with `--dry-run`.** Every mutating command builds and
-  prints the request without calling Google when `--dry-run` is passed; use it
-  before performing a mutation. Only send/mutate when that is the requested task.
+- **Preview writes with `--dry-run` where supported.** Most mutating commands
+  build and print the request without calling Google when `--dry-run` is passed
+  (a few simple writes — e.g. `drive upload`, `tasks add` — omit it). Use it
+  before a mutation when available; only mutate when that is the requested task.
 - **Command availability is host-controlled.** The host registers only the
   commands it allows; if a command isn't available, it wasn't enabled.
 
@@ -77,14 +78,15 @@ gog drive about --json                    # storage quota + account
 # Writes — need the host's write tier (read-only by default); --dry-run previews
 gog drive upload /gog/report.pdf --name Report.pdf      # edit (--parent needs full)
 gog drive mkdir 'Q3 Reports' --parent <folderId>         # edit
-gog drive rename <fileId> 'Final.pdf'                    # edit
+gog drive rename <fileId> --name 'Final.pdf'             # edit
 gog drive cp <fileId> --name Copy.pdf                    # edit (--parent needs full)
 gog drive untrash <fileId>                               # edit
 gog drive trash <fileId>                                 # full (reversible via untrash)
 gog drive mv <fileId> --to <folderId> [--from <oldId>]   # full
-gog drive share <fileId> --email user@x.com --role reader [--notify]   # full
-gog drive share <fileId> --anyone --role reader          # full
-gog drive unshare <fileId> --permission <permId>         # full
+gog drive share <fileId> --email user@x.com --role reader   # full
+gog drive share <fileId> --anyone --role reader             # full
+gog drive unshare <fileId> --permission <permId>            # full
+# share --notify emails the grantee: an outbound send NOT covered by the send gate
 ```
 
 `download` writes into the sandbox workspace — choose a path under a mount
