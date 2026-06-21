@@ -2677,6 +2677,143 @@ extension Trait where Self == WriteTierTrait {
         #expect(String(decoding: saved, as: UTF8.self) == "PDFDATA")
     }
 
+    // MARK: - Writes: Docs / Slides
+
+    @Test func docsCreatePostsToDocumentsEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data(#"{"documentId":"D1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog docs create --title 'My Doc'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("created: D1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/v1/documents") == true)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self).contains("My Doc"))
+    }
+
+    @Test func docsAppendPostsBatchUpdate() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog docs append D1 --text Hello")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/documents/D1:batchUpdate") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("insertText") && body.contains("endOfSegmentLocation"))
+        #expect(body.contains("Hello"))
+    }
+
+    @Test func docsFindReplaceRequiresFind() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog docs find-replace D1 --find '' --replace x")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--find"))
+    }
+
+    @Test func docsFindReplacePostsReplaceAllText() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs find-replace D1 --find foo --replace bar")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("replaceAllText"))
+        #expect(body.contains("foo") && body.contains("bar"))
+    }
+
+    @Test func docsCreateDryRunDoesNotPost() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog docs create --title X --dry-run")
+        #expect(run.exitStatus == .success)
+        #expect(run.stderr.contains("dry-run: not creating"))
+        #expect(run.stdout.contains("X"))
+    }
+
+    @Test func slidesCreatePostsToPresentationsEndpoint() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200,
+                body: Data(#"{"presentationId":"P1"}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides create --title Deck")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("created: P1"))
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.hasSuffix("/v1/presentations") == true)
+    }
+
+    @Test func slidesAddSlidePostsBatchUpdate() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides add-slide P1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate")
+            == true)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("createSlide"))
+    }
+
+    @Test func slidesReplaceTextPostsReplaceAllText() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides replace-text P1 --find foo --replace bar")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("replaceAllText") && body.contains("foo"))
+    }
+
     @Test func formsGetRenders() async throws {
         let shell = Shell()
         shell.registerGogCommands()

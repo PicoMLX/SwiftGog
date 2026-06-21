@@ -126,6 +126,11 @@ gog tasks add 'Buy milk' --list <listId>
 gog docs cat <documentId>                 # prints the doc's text
 gog docs cat <documentId> --format markdown
 gog docs cat <documentId> --out /gog/doc.md
+
+# Writes — need the write tier + the host to allow docs.googleapis.com
+gog docs create --title 'Notes'                              # edit
+gog docs append <documentId> --text 'A new paragraph.'       # edit
+gog docs find-replace <documentId> --find foo --replace bar  # edit
 ```
 
 ## Sheets
@@ -140,6 +145,11 @@ gog sheets update <spreadsheetId> 'Sheet1!A1' --values-json '[["hello","world"]]
 ```bash
 gog slides export <presentationId> --out /gog/deck.pdf
 gog slides export <presentationId> --mime text/plain --out /gog/deck.txt
+
+# Writes — need the write tier + the host to allow slides.googleapis.com
+gog slides create --title 'Deck'                                  # edit
+gog slides add-slide <presentationId>                             # edit (blank slide)
+gog slides replace-text <presentationId> --find foo --replace bar # edit
 ```
 
 ## Chat

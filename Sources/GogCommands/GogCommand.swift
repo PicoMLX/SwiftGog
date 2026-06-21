@@ -2685,8 +2685,9 @@ private struct TaskItem: Decodable {
 struct GogDocs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "docs",
-        abstract: "Google Docs (export via Drive).",
-        subcommands: [DocsCat.self],
+        abstract: "Google Docs (export via Drive; create/append/find-replace).",
+        subcommands: [DocsCat.self, DocsCreate.self, DocsAppend.self,
+                      DocsFindReplace.self],
         aliases: ["doc"])
 }
 
@@ -2733,6 +2734,145 @@ struct DocsCat: AsyncParsableCommand {
             throw ExitCode(23)
         }
         Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
+}
+
+/// `gog docs create --title <t>` — create a Google Doc (Docs API). Needs the
+/// host to allow `docs.googleapis.com`.
+struct DocsCreate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a Google Doc (--dry-run to preview).",
+        aliases: ["new"])
+
+    @Option(name: .long, help: "Document title.") var title: String
+    @Flag(name: .long, help: "Build the request but do not create.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        let payload = try JSONEncoder().encode(["title": title])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL("https://docs.googleapis.com/v1/documents")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        struct Created: Decodable { let documentId: String? }
+        let doc = try JSONDecoder().decode(Created.self, from: result)
+        Shell.bashCurrent.stdout("created: \(doc.documentId ?? "")\n")
+    }
+}
+
+/// `gog docs append <documentId> --text <t>` — append text at the end of a Doc
+/// (Docs `batchUpdate` insertText at the end-of-body segment).
+struct DocsAppend: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "append",
+        abstract: "Append text to the end of a Doc (--dry-run to preview).")
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Option(name: [.customShort("t"), .long], help: "Text to append.") var text: String
+    @Flag(name: .long, help: "Build the request but do not append.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct InsertText: Encodable {
+                    struct End: Encodable {}
+                    let endOfSegmentLocation: End
+                    let text: String
+                }
+                let insertText: InsertText
+            }
+            let requests: [Request]
+        }
+        let payload = try JSONEncoder().encode(Batch(requests: [
+            .init(insertText: .init(endOfSegmentLocation: .init(), text: text))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not appending\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("appended to: \(documentId)\n")
+    }
+}
+
+/// `gog docs find-replace <documentId> --find <f> --replace <r>` — replace every
+/// occurrence of a string in a Doc (Docs `batchUpdate` replaceAllText).
+struct DocsFindReplace: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "find-replace",
+        abstract: "Replace all occurrences of text in a Doc (--dry-run to preview).",
+        aliases: ["replace"])
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Option(name: .long, help: "Text to find.") var find: String
+    @Option(name: .long, help: "Replacement text (omit to delete matches).")
+    var replace: String = ""
+    @Flag(name: .long, help: "Match case when finding.") var matchCase: Bool = false
+    @Flag(name: .long, help: "Build the request but do not modify.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard !find.isEmpty else {
+            Shell.bashCurrent.stderr("gog: docs find-replace needs a non-empty --find\n")
+            throw ExitCode(2)
+        }
+        let payload = try JSONEncoder().encode(
+            DocsReplaceBatch(find: find, replace: replace, matchCase: matchCase))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not modifying\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("replaced in: \(documentId)\n")
+    }
+}
+
+/// A `replaceAllText` batchUpdate body, shared by Docs and Slides find-replace.
+private struct DocsReplaceBatch: Encodable {
+    struct Request: Encodable {
+        struct ReplaceAllText: Encodable {
+            struct ContainsText: Encodable { let text: String; let matchCase: Bool }
+            let containsText: ContainsText
+            let replaceText: String
+        }
+        let replaceAllText: ReplaceAllText
+    }
+    let requests: [Request]
+    init(find: String, replace: String, matchCase: Bool) {
+        requests = [.init(replaceAllText: .init(
+            containsText: .init(text: find, matchCase: matchCase),
+            replaceText: replace))]
     }
 }
 
@@ -3065,8 +3205,9 @@ private func tsvEscaped(_ value: String) -> String {
 struct GogSlides: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "slides",
-        abstract: "Google Slides (export via Drive).",
-        subcommands: [SlidesExport.self],
+        abstract: "Google Slides (export via Drive; create/add-slide/replace-text).",
+        subcommands: [SlidesExport.self, SlidesCreate.self, SlidesAddSlide.self,
+                      SlidesReplaceText.self],
         aliases: ["slide"])
 }
 
@@ -3099,6 +3240,123 @@ struct SlidesExport: AsyncParsableCommand {
             throw ExitCode(23)
         }
         Shell.bashCurrent.stderr("wrote \(data.count) bytes to \(out)\n")
+    }
+}
+
+/// `gog slides create --title <t>` — create a Google Slides presentation (Slides
+/// API). Needs the host to allow `slides.googleapis.com`.
+struct SlidesCreate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Create a Slides presentation (--dry-run to preview).",
+        aliases: ["new"])
+
+    @Option(name: .long, help: "Presentation title.") var title: String
+    @Flag(name: .long, help: "Build the request but do not create.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        let payload = try JSONEncoder().encode(["title": title])
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL("https://slides.googleapis.com/v1/presentations")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        struct Created: Decodable { let presentationId: String? }
+        let p = try JSONDecoder().decode(Created.self, from: result)
+        Shell.bashCurrent.stdout("created: \(p.presentationId ?? "")\n")
+    }
+}
+
+/// `gog slides add-slide <presentationId>` — append a blank slide (Slides
+/// `batchUpdate` createSlide).
+struct SlidesAddSlide: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add-slide",
+        abstract: "Add a blank slide (--dry-run to preview).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Flag(name: .long, help: "Build the request but do not add.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct CreateSlide: Encodable {}
+                let createSlide: CreateSlide
+            }
+            let requests: [Request]
+        }
+        let payload = try JSONEncoder().encode(
+            Batch(requests: [.init(createSlide: .init())]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not adding\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("slide added to: \(presentationId)\n")
+    }
+}
+
+/// `gog slides replace-text <presentationId> --find <f> --replace <r>` — replace
+/// every occurrence of a string across the deck (Slides replaceAllText).
+struct SlidesReplaceText: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "replace-text",
+        abstract: "Replace all occurrences of text in a deck (--dry-run to preview).",
+        aliases: ["replace"])
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Option(name: .long, help: "Text to find.") var find: String
+    @Option(name: .long, help: "Replacement text (omit to delete matches).")
+    var replace: String = ""
+    @Flag(name: .long, help: "Match case when finding.") var matchCase: Bool = false
+    @Flag(name: .long, help: "Build the request but do not modify.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard !find.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: slides replace-text needs a non-empty --find\n")
+            throw ExitCode(2)
+        }
+        let payload = try JSONEncoder().encode(
+            DocsReplaceBatch(find: find, replace: replace, matchCase: matchCase))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not modifying\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("replaced in: \(presentationId)\n")
     }
 }
 
