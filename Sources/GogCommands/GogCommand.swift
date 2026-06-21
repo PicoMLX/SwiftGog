@@ -2781,6 +2781,9 @@ struct DocsAppend: AsyncParsableCommand {
     @Argument(help: "Document ID.") var documentId: String
     @Option(name: [.customShort("t"), .long],
             help: "Text to append (inserted as a new paragraph).") var text: String
+    @Option(name: .long,
+            help: "Append into a specific document tab (default: the first tab).")
+    var tabId: String?
     @Flag(name: .long, help: "Build the request but do not append.")
     var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
@@ -2791,7 +2794,9 @@ struct DocsAppend: AsyncParsableCommand {
         struct Batch: Encodable {
             struct Request: Encodable {
                 struct InsertText: Encodable {
-                    struct End: Encodable {}
+                    // tabId is omitted (encodeIfPresent) for single-tab docs, which
+                    // the API resolves to the only tab; set it to target a tab.
+                    struct End: Encodable { let tabId: String? }
                     let endOfSegmentLocation: End
                     let text: String
                 }
@@ -2805,7 +2810,8 @@ struct DocsAppend: AsyncParsableCommand {
         // would need an extra read and would break the offline --dry-run, and
         // appending a paragraph to an existing doc is the case worth optimizing.)
         let payload = try JSONEncoder().encode(Batch(requests: [
-            .init(insertText: .init(endOfSegmentLocation: .init(), text: "\n" + text))]))
+            .init(insertText: .init(
+                endOfSegmentLocation: .init(tabId: tabId), text: "\n" + text))]))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not appending\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")

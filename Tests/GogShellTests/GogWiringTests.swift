@@ -2719,6 +2719,23 @@ extension Trait where Self == WriteTierTrait {
         #expect(body.contains(#"\nHello"#))
     }
 
+    @Test func docsAppendTargetsTabWhenGiven() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog docs append D1 --text Hi --tab-id t.0")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#""tabId":"t.0""#))
+    }
+
     @Test func docsFindReplaceRequiresFind() async throws {
         let shell = Shell()
         shell.registerGogCommands()
