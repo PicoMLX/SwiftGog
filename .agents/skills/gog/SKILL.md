@@ -75,8 +75,8 @@ gog drive permissions <fileId> --json   # who can access it (id, role, type, who
 gog drive revisions <fileId> --json      # version history
 gog drive about --json                    # storage quota + account
 
-# Writes — need the host's write tier (read-only by default); --dry-run previews
-gog drive upload /gog/report.pdf --name Report.pdf      # edit (--parent needs full)
+# Writes — need the host's write tier (read-only by default); most preview with --dry-run
+gog drive upload /gog/report.pdf --name Report.pdf      # edit; no --dry-run (--parent needs full)
 gog drive mkdir 'Q3 Reports' --parent <folderId>         # edit
 gog drive rename <fileId> --name 'Final.pdf'             # edit
 gog drive cp <fileId> --name Copy.pdf                    # edit (--parent needs full)
@@ -124,7 +124,7 @@ gog calendar events --max 20 --json
 gog calendar events --from 2026-06-01T00:00:00Z --json
 gog calendar get <eventId> --json
 gog calendar create --summary 'Standup' \
-  --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z --dry-run
+  --start 2026-06-02T10:00:00Z --end 2026-06-02T10:30:00Z --dry-run   # edit
 
 gog calendar calendars --json                 # your calendar list (id, summary, role)
 gog calendar freebusy --json                  # busy slots, next 24h on primary
@@ -156,7 +156,7 @@ gog contacts delete people/c123                                    # full
 ```bash
 gog tasks lists --json
 gog tasks list --list <listId> --json
-gog tasks add 'Buy milk' --list <listId>
+gog tasks add 'Buy milk' --list <listId>                # edit (no --dry-run)
 gog tasks complete <taskId> --list <listId>             # edit (alias: done)
 gog tasks delete <taskId> --list <listId>               # full (alias: rm)
 ```
@@ -173,7 +173,7 @@ gog docs cat <documentId> --out /gog/doc.md
 
 ```bash
 gog sheets get <spreadsheetId> 'Sheet1!A1:D20' --json
-gog sheets update <spreadsheetId> 'Sheet1!A1' --values-json '[["hello","world"]]' --dry-run
+gog sheets update <spreadsheetId> 'Sheet1!A1' --values-json '[["hello","world"]]' --dry-run  # edit
 gog sheets append <spreadsheetId> 'Sheet1!A1' --values-json '[["a","b"]]'   # edit (after the table)
 gog sheets clear <spreadsheetId> 'Sheet1!A1:D9'                             # full
 ```
