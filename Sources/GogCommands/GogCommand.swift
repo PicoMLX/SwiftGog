@@ -2685,9 +2685,9 @@ private struct TaskItem: Decodable {
 struct GogDocs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "docs",
-        abstract: "Google Docs (export via Drive; create/append/find-replace/clear).",
+        abstract: "Google Docs (export via Drive; create/append/find-replace/clear/insert-table).",
         subcommands: [DocsCat.self, DocsCreate.self, DocsAppend.self,
-                      DocsFindReplace.self, DocsClear.self],
+                      DocsFindReplace.self, DocsClear.self, DocsInsertTable.self],
         aliases: ["doc"])
 }
 
@@ -2950,6 +2950,65 @@ struct DocsClear: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("cleared: \(documentId)\n")
+    }
+}
+
+/// `gog docs insert-table <documentId> --rows R --cols C` — insert an empty
+/// native table at the end of the doc (or at `--index`). Cells start empty;
+/// fill them with a follow-up edit (cell-level population isn't done here).
+struct DocsInsertTable: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "insert-table",
+        abstract: "Insert an empty table into a Doc (--dry-run to preview).")
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Option(name: .long, help: "Number of rows.") var rows: Int
+    @Option(name: .long, help: "Number of columns.") var cols: Int
+    @Option(name: .long, help: "Body index to insert at (default: end of doc).")
+    var index: Int?
+    @Flag(name: .long, help: "Build the request but do not insert.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard rows > 0, cols > 0 else {
+            Shell.bashCurrent.stderr("gog: --rows and --cols must be positive\n")
+            throw ExitCode(2)
+        }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct InsertTable: Encodable {
+                    struct End: Encodable {}
+                    struct Loc: Encodable { let index: Int }
+                    let endOfSegmentLocation: End?
+                    let location: Loc?
+                    let rows: Int
+                    let columns: Int
+                }
+                let insertTable: InsertTable
+            }
+            let requests: [Request]
+        }
+        // Exactly one location field: end-of-body by default, else an index.
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(
+            insertTable: .init(endOfSegmentLocation: index == nil ? .init() : nil,
+                               location: index.map { .init(index: $0) },
+                               rows: rows, columns: cols))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not inserting\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("inserted \(rows)x\(cols) table: \(documentId)\n")
     }
 }
 
@@ -3282,10 +3341,11 @@ private func tsvEscaped(_ value: String) -> String {
 struct GogSlides: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "slides",
-        abstract: "Google Slides (export, create, edit, list/delete slides).",
+        abstract: "Google Slides (export, create, edit, list/read/delete slides).",
         subcommands: [SlidesExport.self, SlidesCreate.self, SlidesAddSlide.self,
                       SlidesReplaceText.self, SlidesListSlides.self,
-                      SlidesDeleteSlide.self],
+                      SlidesDeleteSlide.self, SlidesReadSlide.self,
+                      SlidesInsertText.self],
         aliases: ["slide"])
 }
 
@@ -3537,6 +3597,129 @@ struct SlidesDeleteSlide: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("deleted slide: \(slideId)\n")
+    }
+}
+
+/// `gog slides read-slide <presentationId> <slideObjectId>` — list a slide's page
+/// elements (objectId + any text), so you can target one with `slides insert-text`.
+struct SlidesReadSlide: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "read-slide",
+        abstract: "List a slide's page elements (objectId + text).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Slide object ID (from `slides list-slides`).") var slideId: String
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    private struct Page: Decodable {
+        struct Element: Decodable {
+            let objectId: String?
+            struct Shape: Decodable {
+                struct Text: Decodable {
+                    struct TE: Decodable {
+                        struct Run: Decodable { let content: String? }
+                        let textRun: Run?
+                    }
+                    let textElements: [TE]?
+                }
+                let text: Text?
+            }
+            let shape: Shape?
+        }
+        let pageElements: [Element]?
+    }
+
+    func run() async throws {
+        // Fetch just this page (pages.get): --json stays scoped to the requested
+        // slide, and an unknown ID 404s instead of silently returning the deck.
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId))"
+                + "/pages/\(pathSegment(slideId))",
+            query: [URLQueryItem(
+                name: "fields",
+                value: "pageElements(objectId,shape(text(textElements(textRun(content)))))")])
+        let data = try await GoogleHTTPClient().get(url)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self) + "\n")
+            return
+        }
+        let elements = try JSONDecoder().decode(Page.self, from: data).pageElements ?? []
+        guard !elements.isEmpty else {
+            Shell.bashCurrent.stderr("no page elements\n")
+            return
+        }
+        for el in elements {
+            let text = (el.shape?.text?.textElements ?? [])
+                .compactMap { $0.textRun?.content }.joined()
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            Shell.bashCurrent.stdout("\(el.objectId ?? "")\t\(tsvEscaped(text))\n")
+        }
+    }
+}
+
+/// `gog slides insert-text <presentationId> <objectId> --text <t>` — insert text
+/// into an existing shape, or a table cell with `--row`/`--col` (find object IDs
+/// with `slides read-slide`).
+struct SlidesInsertText: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "insert-text",
+        abstract: "Insert text into a slide shape/table by object ID (--dry-run).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Page element object ID (from `slides read-slide`).")
+    var objectId: String
+    @Option(name: [.customShort("t"), .long], help: "Text to insert.") var text: String
+    @Option(name: .long, help: "Insertion index within the element (default 0).")
+    var index: Int = 0
+    @Option(name: .long, help: "Table cell row (0-based); requires --col.") var row: Int?
+    @Option(name: .long, help: "Table cell column (0-based); requires --row.") var col: Int?
+    @Flag(name: .long, help: "Build the request but do not insert.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard (row == nil) == (col == nil) else {
+            Shell.bashCurrent.stderr(
+                "gog: --row and --col must be given together (table cell)\n")
+            throw ExitCode(2)
+        }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct InsertText: Encodable {
+                    struct CellLocation: Encodable {
+                        let rowIndex: Int
+                        let columnIndex: Int
+                    }
+                    let objectId: String
+                    let cellLocation: CellLocation?
+                    let text: String
+                    let insertionIndex: Int
+                }
+                let insertText: InsertText
+            }
+            let requests: [Request]
+        }
+        let cell = row.flatMap { r in
+            col.map { Batch.Request.InsertText.CellLocation(rowIndex: r, columnIndex: $0) } }
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(insertText: .init(
+            objectId: objectId, cellLocation: cell, text: text, insertionIndex: index))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not inserting\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("inserted text into: \(objectId)\n")
     }
 }
 
