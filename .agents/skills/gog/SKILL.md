@@ -198,7 +198,7 @@ gog slides replace-text <presentationId> --find foo --replace bar # edit
 gog slides list-slides <presentationId>                           # read (slide objectIds)
 gog slides delete-slide <presentationId> <slideObjectId>          # full
 gog slides read-slide <presentationId> <slideObjectId>            # read (element objectIds + text)
-gog slides insert-text <presentationId> <objectId> --text 'Hi'    # edit (into a shape/table cell)
+gog slides insert-text <presentationId> <objectId> --text 'Hi'    # edit (shape; add --row/--col for a table cell)
 ```
 
 ## Chat

@@ -3612,48 +3612,39 @@ struct SlidesReadSlide: AsyncParsableCommand {
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
 
-    private struct Pres: Decodable {
-        struct Slide: Decodable {
+    private struct Page: Decodable {
+        struct Element: Decodable {
             let objectId: String?
-            struct Element: Decodable {
-                let objectId: String?
-                struct Shape: Decodable {
-                    struct Text: Decodable {
-                        struct TE: Decodable {
-                            struct Run: Decodable { let content: String? }
-                            let textRun: Run?
-                        }
-                        let textElements: [TE]?
+            struct Shape: Decodable {
+                struct Text: Decodable {
+                    struct TE: Decodable {
+                        struct Run: Decodable { let content: String? }
+                        let textRun: Run?
                     }
-                    let text: Text?
+                    let textElements: [TE]?
                 }
-                let shape: Shape?
+                let text: Text?
             }
-            let pageElements: [Element]?
+            let shape: Shape?
         }
-        let slides: [Slide]?
+        let pageElements: [Element]?
     }
 
     func run() async throws {
+        // Fetch just this page (pages.get): --json stays scoped to the requested
+        // slide, and an unknown ID 404s instead of silently returning the deck.
         let url = try googleURL(
-            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId))",
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId))"
+                + "/pages/\(pathSegment(slideId))",
             query: [URLQueryItem(
                 name: "fields",
-                value: "slides(objectId,pageElements(objectId,"
-                    + "shape(text(textElements(textRun(content))))))")])
+                value: "pageElements(objectId,shape(text(textElements(textRun(content)))))")])
         let data = try await GoogleHTTPClient().get(url)
         if json {
             Shell.bashCurrent.stdout(String(decoding: data, as: UTF8.self) + "\n")
             return
         }
-        let pres = try JSONDecoder().decode(Pres.self, from: data)
-        guard let slide = pres.slides?.first(where: { $0.objectId == slideId }) else {
-            Shell.bashCurrent.stderr(
-                "gog: \(slideId) is not a slide in this presentation "
-                    + "(see `slides list-slides`)\n")
-            throw ExitCode(2)
-        }
-        let elements = slide.pageElements ?? []
+        let elements = try JSONDecoder().decode(Page.self, from: data).pageElements ?? []
         guard !elements.isEmpty else {
             Shell.bashCurrent.stderr("no page elements\n")
             return
@@ -3663,13 +3654,14 @@ struct SlidesReadSlide: AsyncParsableCommand {
                 .compactMap { $0.textRun?.content }.joined()
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespaces)
-            Shell.bashCurrent.stdout("\(el.objectId ?? "")\t\(text)\n")
+            Shell.bashCurrent.stdout("\(el.objectId ?? "")\t\(tsvEscaped(text))\n")
         }
     }
 }
 
 /// `gog slides insert-text <presentationId> <objectId> --text <t>` — insert text
-/// into an existing shape or table cell (find object IDs with `slides read-slide`).
+/// into an existing shape, or a table cell with `--row`/`--col` (find object IDs
+/// with `slides read-slide`).
 struct SlidesInsertText: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "insert-text",
@@ -3681,6 +3673,8 @@ struct SlidesInsertText: AsyncParsableCommand {
     @Option(name: [.customShort("t"), .long], help: "Text to insert.") var text: String
     @Option(name: .long, help: "Insertion index within the element (default 0).")
     var index: Int = 0
+    @Option(name: .long, help: "Table cell row (0-based); requires --col.") var row: Int?
+    @Option(name: .long, help: "Table cell column (0-based); requires --row.") var col: Int?
     @Flag(name: .long, help: "Build the request but do not insert.")
     var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
@@ -3688,10 +3682,20 @@ struct SlidesInsertText: AsyncParsableCommand {
 
     func run() async throws {
         try requireWriteTier(.edit)
+        guard (row == nil) == (col == nil) else {
+            Shell.bashCurrent.stderr(
+                "gog: --row and --col must be given together (table cell)\n")
+            throw ExitCode(2)
+        }
         struct Batch: Encodable {
             struct Request: Encodable {
                 struct InsertText: Encodable {
+                    struct CellLocation: Encodable {
+                        let rowIndex: Int
+                        let columnIndex: Int
+                    }
                     let objectId: String
+                    let cellLocation: CellLocation?
                     let text: String
                     let insertionIndex: Int
                 }
@@ -3699,8 +3703,10 @@ struct SlidesInsertText: AsyncParsableCommand {
             }
             let requests: [Request]
         }
-        let payload = try JSONEncoder().encode(Batch(requests: [.init(
-            insertText: .init(objectId: objectId, text: text, insertionIndex: index))]))
+        let cell = row.flatMap { r in
+            col.map { Batch.Request.InsertText.CellLocation(rowIndex: r, columnIndex: $0) } }
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(insertText: .init(
+            objectId: objectId, cellLocation: cell, text: text, insertionIndex: index))]))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not inserting\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
