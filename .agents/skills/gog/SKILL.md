@@ -194,6 +194,8 @@ gog slides export <presentationId> --mime text/plain --out /gog/deck.txt
 # Writes — need the write tier + the host to allow slides.googleapis.com
 gog slides create --title 'Deck'                                  # edit
 gog slides add-slide <presentationId>                             # edit (blank slide)
+gog slides create-table <presentationId> <slideObjectId> --rows 2 --cols 3    # edit (empty table; fill with insert-text --row/--col)
+gog slides create-textbox <presentationId> <slideObjectId> --text 'Hi'        # edit (text box; --x/--y/--width/--height in points)
 gog slides replace-text <presentationId> --find foo --replace bar # edit
 gog slides list-slides <presentationId>                           # read (slide objectIds)
 gog slides delete-slide <presentationId> <slideObjectId>          # full

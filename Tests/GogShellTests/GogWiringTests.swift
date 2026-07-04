@@ -3068,6 +3068,88 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("--row and --col"))
     }
 
+    @Test func slidesCreateTablePostsCreateTable() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides create-table P1 s1 --rows 2 --cols 3 --object-id tbl1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate")
+            == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("createTable") && body.contains(#""pageObjectId":"s1""#))
+        #expect(body.contains(#""rows":2"#) && body.contains(#""columns":3"#))
+        #expect(body.contains(#""objectId":"tbl1""#))
+    }
+
+    @Test func slidesCreateTableRejectsNonPositive() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog slides create-table P1 s1 --rows 0 --cols 3")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("must be positive"))
+    }
+
+    @Test func slidesCreateTextboxPostsCreateShape() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides create-textbox P1 s1 --object-id tb1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("createShape") && body.contains(#""shapeType":"TEXT_BOX""#))
+        #expect(body.contains(#""pageObjectId":"s1""#) && body.contains(#""objectId":"tb1""#))
+        #expect(body.contains(#""unit":"EMU""#))
+        #expect(!body.contains("insertText"))   // no --text ⇒ createShape only
+    }
+
+    @Test func slidesCreateTextboxWithTextAppendsInsertText() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides create-textbox P1 s1 --object-id tb1 --text Hi")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("createShape") && body.contains("insertText"))
+        #expect(body.contains(#""objectId":"tb1""#) && body.contains("Hi"))
+    }
+
+    @Test func slidesCreateTextboxRejectsNonPositiveSize() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog slides create-textbox P1 s1 --width 0")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("must be positive"))
+    }
+
     @Test func formsGetRenders() async throws {
         let shell = Shell()
         shell.registerGogCommands()
