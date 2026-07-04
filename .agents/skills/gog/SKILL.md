@@ -174,6 +174,7 @@ gog docs append <documentId> --text 'A new paragraph.'       # edit
 gog docs find-replace <documentId> --find foo --replace bar  # edit
 gog docs clear <documentId>                                  # full (empties the main tab; keeps the doc)
 gog docs insert-table <documentId> --rows 2 --cols 3         # edit (empty table at end; --index to place)
+gog docs insert-image <documentId> --url https://ex.com/logo.png  # edit (inline image from a public URL; --index to place)
 ```
 
 ## Sheets
@@ -196,6 +197,7 @@ gog slides create --title 'Deck'                                  # edit
 gog slides add-slide <presentationId>                             # edit (blank slide)
 gog slides create-table <presentationId> <slideObjectId> --rows 2 --cols 3    # edit (empty table; fill with insert-text --row/--col)
 gog slides create-textbox <presentationId> <slideObjectId> --text 'Hi'        # edit (text box; --x/--y/--width/--height in points)
+gog slides create-image <presentationId> <slideObjectId> --url https://ex.com/logo.png   # edit (image from a public URL)
 gog slides replace-text <presentationId> --find foo --replace bar # edit
 gog slides list-slides <presentationId>                           # read (slide objectIds)
 gog slides delete-slide <presentationId> <slideObjectId>          # full

@@ -3164,6 +3164,67 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("finite"))
     }
 
+    @Test func slidesCreateImagePostsCreateImage() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides create-image P1 s1 --url https://example.com/i.png --object-id img1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate")
+            == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("createImage") && body.contains(#""pageObjectId":"s1""#))
+        #expect(body.contains("example.com/i.png") && body.contains(#""objectId":"img1""#))
+    }
+
+    @Test func slidesCreateImageRejectsNonHttpUrl() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog slides create-image P1 s1 --url /gog/local.png")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("public http"))
+    }
+
+    @Test func docsInsertImagePostsInsertInlineImage() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs insert-image D1 --url https://example.com/i.png")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/documents/D1:batchUpdate") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("insertInlineImage") && body.contains("example.com/i.png"))
+        #expect(body.contains("endOfSegmentLocation"))   // default = end of doc
+    }
+
+    @Test func docsInsertImageRejectsNonHttpUrl() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog docs insert-image D1 --url /gog/local.png")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("public http"))
+    }
+
     @Test func formsGetRenders() async throws {
         let shell = Shell()
         shell.registerGogCommands()

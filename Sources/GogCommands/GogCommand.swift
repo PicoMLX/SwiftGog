@@ -2685,9 +2685,10 @@ private struct TaskItem: Decodable {
 struct GogDocs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "docs",
-        abstract: "Google Docs (export via Drive; create/append/find-replace/clear/insert-table).",
+        abstract: "Google Docs (export via Drive; create/append/find-replace/clear/insert-table/insert-image).",
         subcommands: [DocsCat.self, DocsCreate.self, DocsAppend.self,
-                      DocsFindReplace.self, DocsClear.self, DocsInsertTable.self],
+                      DocsFindReplace.self, DocsClear.self, DocsInsertTable.self,
+                      DocsInsertImage.self],
         aliases: ["doc"])
 }
 
@@ -3009,6 +3010,73 @@ struct DocsInsertTable: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("inserted \(rows)x\(cols) table: \(documentId)\n")
+    }
+}
+
+/// Validate an image URL for docs/slides inserts. Google fetches the image
+/// server-side, so it must be a public http(s) URL — a sandbox path or a bare
+/// string can't be reached and would only fail later with an opaque API error.
+private func requirePublicImageURL(_ url: String) throws {
+    let lower = url.lowercased()
+    guard lower.hasPrefix("https://") || lower.hasPrefix("http://") else {
+        Shell.bashCurrent.stderr(
+            "gog: --url must be a public http(s) URL (Google fetches the image server-side)\n")
+        throw ExitCode(2)
+    }
+}
+
+/// `gog docs insert-image <documentId> --url <url>` — insert an inline image from a
+/// public URL at the end of the doc (or at `--index`). Google fetches the URL, so
+/// it must be publicly reachable (not a sandbox path).
+struct DocsInsertImage: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "insert-image",
+        abstract: "Insert an inline image from a public URL into a Doc (--dry-run).")
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Option(name: .long, help: "Public http(s) image URL (fetched by Google).")
+    var url: String
+    @Option(name: .long, help: "Body index to insert at (default: end of doc).")
+    var index: Int?
+    @Flag(name: .long, help: "Build the request but do not insert.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        try requirePublicImageURL(url)
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct InsertInlineImage: Encodable {
+                    struct End: Encodable {}
+                    struct Loc: Encodable { let index: Int }
+                    let uri: String
+                    let endOfSegmentLocation: End?
+                    let location: Loc?
+                }
+                let insertInlineImage: InsertInlineImage
+            }
+            let requests: [Request]
+        }
+        // Exactly one location field: end-of-body by default, else an index.
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(
+            insertInlineImage: .init(uri: url,
+                                     endOfSegmentLocation: index == nil ? .init() : nil,
+                                     location: index.map { .init(index: $0) }))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not inserting\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let apiURL = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(apiURL, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("inserted image: \(documentId)\n")
     }
 }
 
@@ -3346,7 +3414,7 @@ struct GogSlides: AsyncParsableCommand {
                       SlidesReplaceText.self, SlidesListSlides.self,
                       SlidesDeleteSlide.self, SlidesReadSlide.self,
                       SlidesInsertText.self, SlidesCreateTable.self,
-                      SlidesCreateTextbox.self],
+                      SlidesCreateTextbox.self, SlidesCreateImage.self],
         aliases: ["slide"])
 }
 
@@ -3891,6 +3959,60 @@ struct SlidesCreateTextbox: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("created textbox: \(boxId)\n")
+    }
+}
+
+/// `gog slides create-image <presentationId> <slideId> --url <url>` — add an image
+/// from a public URL to a slide (Slides `batchUpdate` createImage). Google fetches
+/// the URL, so it must be publicly reachable (not a sandbox path). The image uses
+/// its default size/placement; `--object-id` names it (else one is generated).
+struct SlidesCreateImage: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create-image",
+        abstract: "Add an image from a public URL to a slide (--dry-run to preview).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Slide object ID (from `slides list-slides`).") var slideId: String
+    @Option(name: .long, help: "Public http(s) image URL (fetched by Google).")
+    var url: String
+    @Option(name: .long, help: "Object ID for the new image (default: generated).")
+    var objectId: String?
+    @Flag(name: .long, help: "Build the request but do not create.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        try requirePublicImageURL(url)
+        let imageId = objectId ?? "image_\(newSlidesObjectSuffix())"
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct CreateImage: Encodable {
+                    struct ElementProperties: Encodable { let pageObjectId: String }
+                    let objectId: String
+                    let url: String
+                    let elementProperties: ElementProperties
+                }
+                let createImage: CreateImage
+            }
+            let requests: [Request]
+        }
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(createImage: .init(
+            objectId: imageId, url: url, elementProperties: .init(pageObjectId: slideId)))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let apiURL = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(apiURL, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("created image: \(imageId)\n")
     }
 }
 
