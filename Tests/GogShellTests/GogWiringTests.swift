@@ -3183,7 +3183,9 @@ extension Trait where Self == WriteTierTrait {
             == true)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("createImage") && body.contains(#""pageObjectId":"s1""#))
-        #expect(body.contains("example.com/i.png") && body.contains(#""objectId":"img1""#))
+        // JSONEncoder escapes "/" as "\/", so check slash-free fragments of the URL.
+        #expect(body.contains("example.com") && body.contains("i.png"))
+        #expect(body.contains(#""objectId":"img1""#))
     }
 
     @Test func slidesCreateImageRejectsNonHttpUrl() async throws {
@@ -3212,7 +3214,9 @@ extension Trait where Self == WriteTierTrait {
         #expect(transport.lastMethod == "POST")
         #expect(transport.lastURL?.absoluteString.contains("/documents/D1:batchUpdate") == true)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
-        #expect(body.contains("insertInlineImage") && body.contains("example.com/i.png"))
+        // JSONEncoder escapes "/" as "\/", so check slash-free fragments of the URL.
+        #expect(body.contains("insertInlineImage"))
+        #expect(body.contains("example.com") && body.contains("i.png"))
         #expect(body.contains("endOfSegmentLocation"))   // default = end of doc
     }
 
@@ -3223,6 +3227,25 @@ extension Trait where Self == WriteTierTrait {
             "gog docs insert-image D1 --url /gog/local.png")
         #expect(run.exitStatus == ExitStatus(2))
         #expect(run.stderr.contains("public http"))
+    }
+
+    @Test func docsInsertImageRejectsNegativeIndex() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // --index=-1 (not "--index -1") so the negative isn't parsed as a flag.
+        let run = try await shell.runCapturing(
+            "gog docs insert-image D1 --url https://example.com/i.png --index=-1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("non-negative"))
+    }
+
+    @Test func docsInsertTableRejectsNegativeIndex() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog docs insert-table D1 --rows 2 --cols 2 --index=-1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("non-negative"))
     }
 
     @Test func formsGetRenders() async throws {

@@ -2978,6 +2978,10 @@ struct DocsInsertTable: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --rows and --cols must be positive\n")
             throw ExitCode(2)
         }
+        if let index, index < 0 {
+            Shell.bashCurrent.stderr("gog: --index must be non-negative\n")
+            throw ExitCode(2)
+        }
         struct Batch: Encodable {
             struct Request: Encodable {
                 struct InsertTable: Encodable {
@@ -3046,6 +3050,10 @@ struct DocsInsertImage: AsyncParsableCommand {
     func run() async throws {
         try requireWriteTier(.edit)
         try requirePublicImageURL(url)
+        if let index, index < 0 {
+            Shell.bashCurrent.stderr("gog: --index must be non-negative\n")
+            throw ExitCode(2)
+        }
         struct Batch: Encodable {
             struct Request: Encodable {
                 struct InsertInlineImage: Encodable {
