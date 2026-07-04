@@ -3056,7 +3056,10 @@ extension Trait where Self == WriteTierTrait {
         }
         #expect(run.exitStatus == .success)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
-        #expect(body.contains(#""cellLocation":{"rowIndex":1,"columnIndex":2}"#))
+        // JSONEncoder emits object keys in a per-process-random order, so check
+        // each field independently rather than a fixed rowIndex/columnIndex order.
+        #expect(body.contains("cellLocation"))
+        #expect(body.contains(#""rowIndex":1"#) && body.contains(#""columnIndex":2"#))
     }
 
     @Test func slidesInsertTextRequiresRowAndColTogether() async throws {
@@ -3148,6 +3151,17 @@ extension Trait where Self == WriteTierTrait {
             "gog slides create-textbox P1 s1 --width 0")
         #expect(run.exitStatus == ExitStatus(2))
         #expect(run.stderr.contains("must be positive"))
+    }
+
+    @Test func slidesCreateTextboxRejectsNonFiniteGeometry() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // --x inf parses to Double.infinity; the EMU Int conversion would trap,
+        // so it must be rejected as a usage error (exit 2), not crash.
+        let run = try await shell.runCapturing(
+            "gog slides create-textbox P1 s1 --x inf")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("finite"))
     }
 
     @Test func formsGetRenders() async throws {

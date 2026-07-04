@@ -3815,6 +3815,15 @@ struct SlidesCreateTextbox: AsyncParsableCommand {
 
     func run() async throws {
         try requireWriteTier(.edit)
+        // The Double→Int EMU conversion below traps on non-finite (NaN/Infinity)
+        // or out-of-Int-range input — and an Infinity would slip past the
+        // positive-size check — so reject bad geometry up front (exit 2).
+        guard x.isFinite, y.isFinite, width.isFinite, height.isFinite,
+              max(abs(x), abs(y), abs(width), abs(height)) < 1_000_000 else {
+            Shell.bashCurrent.stderr(
+                "gog: --x/--y/--width/--height must be finite and within range\n")
+            throw ExitCode(2)
+        }
         guard width > 0, height > 0 else {
             Shell.bashCurrent.stderr("gog: --width and --height must be positive\n")
             throw ExitCode(2)
