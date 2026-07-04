@@ -2972,6 +2972,102 @@ extension Trait where Self == WriteTierTrait {
         #expect(transport.lastMethod == "GET")   // no deleteObject POST issued
     }
 
+    @Test func docsInsertTablePostsInsertTable() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog docs insert-table D1 --rows 2 --cols 3")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/documents/D1:batchUpdate") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("insertTable") && body.contains("endOfSegmentLocation"))
+        #expect(body.contains(#""rows":2"#) && body.contains(#""columns":3"#))
+    }
+
+    @Test func docsInsertTableRejectsNonPositive() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog docs insert-table D1 --rows 0 --cols 3")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("positive"))
+    }
+
+    @Test func slidesReadSlideListsElements() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // pages.get returns the single page (no slides[] wrapper).
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"pageElements":[{"objectId":"sh1","shape":{"text":{"textElements":[{"textRun":{"content":"Title"}}]}}}]}"#
+                .utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides read-slide P1 s1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(run.stdout.contains("sh1") && run.stdout.contains("Title"))
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1/pages/s1")
+            == true)
+    }
+
+    @Test func slidesInsertTextPostsInsertText() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides insert-text P1 sh1 --text Hi")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate")
+            == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("insertText") && body.contains(#""objectId":"sh1""#))
+        #expect(body.contains("Hi"))
+    }
+
+    @Test func slidesInsertTextIntoTableCellEncodesCellLocation() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides insert-text P1 tbl1 --text Hi --row 1 --col 2")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains(#""cellLocation":{"rowIndex":1,"columnIndex":2}"#))
+    }
+
+    @Test func slidesInsertTextRequiresRowAndColTogether() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog slides insert-text P1 tbl1 --text Hi --row 1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--row and --col"))
+    }
+
     @Test func formsGetRenders() async throws {
         let shell = Shell()
         shell.registerGogCommands()

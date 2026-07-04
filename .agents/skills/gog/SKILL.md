@@ -173,6 +173,7 @@ gog docs create --title 'Notes'                              # edit
 gog docs append <documentId> --text 'A new paragraph.'       # edit
 gog docs find-replace <documentId> --find foo --replace bar  # edit
 gog docs clear <documentId>                                  # full (empties the main tab; keeps the doc)
+gog docs insert-table <documentId> --rows 2 --cols 3         # edit (empty table at end; --index to place)
 ```
 
 ## Sheets
@@ -196,6 +197,8 @@ gog slides add-slide <presentationId>                             # edit (blank 
 gog slides replace-text <presentationId> --find foo --replace bar # edit
 gog slides list-slides <presentationId>                           # read (slide objectIds)
 gog slides delete-slide <presentationId> <slideObjectId>          # full
+gog slides read-slide <presentationId> <slideObjectId>            # read (element objectIds + text)
+gog slides insert-text <presentationId> <objectId> --text 'Hi'    # edit (shape; add --row/--col for a table cell)
 ```
 
 ## Chat
