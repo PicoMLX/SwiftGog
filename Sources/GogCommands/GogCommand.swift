@@ -3345,7 +3345,8 @@ struct GogSlides: AsyncParsableCommand {
         subcommands: [SlidesExport.self, SlidesCreate.self, SlidesAddSlide.self,
                       SlidesReplaceText.self, SlidesListSlides.self,
                       SlidesDeleteSlide.self, SlidesReadSlide.self,
-                      SlidesInsertText.self],
+                      SlidesInsertText.self, SlidesCreateTable.self,
+                      SlidesCreateTextbox.self],
         aliases: ["slide"])
 }
 
@@ -3720,6 +3721,176 @@ struct SlidesInsertText: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("inserted text into: \(objectId)\n")
+    }
+}
+
+/// A random suffix for a Slides object ID, restricted to word characters so it
+/// satisfies the API's object-ID rule. Used when the caller doesn't pass one.
+private func newSlidesObjectSuffix() -> String {
+    UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+}
+
+/// `gog slides create-table <presentationId> <slideId> --rows R --cols C` — add an
+/// empty native table to a slide (Slides `batchUpdate` createTable). Fill its cells
+/// with `slides insert-text --row --col`. The table auto-sizes; `--object-id` names
+/// it (otherwise one is generated and printed).
+struct SlidesCreateTable: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create-table",
+        abstract: "Add an empty table to a slide (--dry-run to preview).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Slide object ID (from `slides list-slides`).") var slideId: String
+    @Option(name: .long, help: "Number of rows.") var rows: Int
+    @Option(name: .long, help: "Number of columns.") var cols: Int
+    @Option(name: .long, help: "Object ID for the new table (default: generated).")
+    var objectId: String?
+    @Flag(name: .long, help: "Build the request but do not create.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard rows > 0, cols > 0 else {
+            Shell.bashCurrent.stderr("gog: --rows and --cols must be positive\n")
+            throw ExitCode(2)
+        }
+        let tableId = objectId ?? "table_\(newSlidesObjectSuffix())"
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct CreateTable: Encodable {
+                    struct ElementProperties: Encodable { let pageObjectId: String }
+                    let objectId: String
+                    let elementProperties: ElementProperties
+                    let rows: Int
+                    let columns: Int
+                }
+                let createTable: CreateTable
+            }
+            let requests: [Request]
+        }
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(createTable: .init(
+            objectId: tableId, elementProperties: .init(pageObjectId: slideId),
+            rows: rows, columns: cols))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("created \(rows)x\(cols) table: \(tableId)\n")
+    }
+}
+
+/// `gog slides create-textbox <presentationId> <slideId> [--text T]` — add a text
+/// box to a slide (Slides `batchUpdate` createShape TEXT_BOX), optionally inserting
+/// text into it in the same request. Position/size are given in points; `--object-id`
+/// names it (otherwise one is generated and printed).
+struct SlidesCreateTextbox: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create-textbox",
+        abstract: "Add a text box to a slide (--dry-run to preview).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Slide object ID (from `slides list-slides`).") var slideId: String
+    @Option(name: [.customShort("t"), .long], help: "Text to place in the box.")
+    var text: String?
+    @Option(name: .long, help: "Left position in points (default 100).") var x: Double = 100
+    @Option(name: .long, help: "Top position in points (default 100).") var y: Double = 100
+    @Option(name: .long, help: "Width in points (default 300).") var width: Double = 300
+    @Option(name: .long, help: "Height in points (default 100).") var height: Double = 100
+    @Option(name: .long, help: "Object ID for the new box (default: generated).")
+    var objectId: String?
+    @Flag(name: .long, help: "Build the request but do not create.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        // The Double→Int EMU conversion below traps on non-finite (NaN/Infinity)
+        // or out-of-Int-range input — and an Infinity would slip past the
+        // positive-size check — so reject bad geometry up front (exit 2).
+        guard x.isFinite, y.isFinite, width.isFinite, height.isFinite,
+              max(abs(x), abs(y), abs(width), abs(height)) < 1_000_000 else {
+            Shell.bashCurrent.stderr(
+                "gog: --x/--y/--width/--height must be finite and within range\n")
+            throw ExitCode(2)
+        }
+        guard width > 0, height > 0 else {
+            Shell.bashCurrent.stderr("gog: --width and --height must be positive\n")
+            throw ExitCode(2)
+        }
+        let boxId = objectId ?? "textbox_\(newSlidesObjectSuffix())"
+        // Slides geometry is EMU; expose points to the caller (1 pt = 12700 EMU).
+        let emu = { (points: Double) in Int((points * 12700).rounded()) }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct CreateShape: Encodable {
+                    struct ElementProperties: Encodable {
+                        struct Dim: Encodable { let magnitude: Int; let unit: String }
+                        struct Size: Encodable { let width: Dim; let height: Dim }
+                        struct Transform: Encodable {
+                            let scaleX: Double
+                            let scaleY: Double
+                            let translateX: Int
+                            let translateY: Int
+                            let unit: String
+                        }
+                        let pageObjectId: String
+                        let size: Size
+                        let transform: Transform
+                    }
+                    let objectId: String
+                    let shapeType: String
+                    let elementProperties: ElementProperties
+                }
+                struct InsertText: Encodable {
+                    let objectId: String
+                    let insertionIndex: Int
+                    let text: String
+                }
+                let createShape: CreateShape?
+                let insertText: InsertText?
+            }
+            let requests: [Request]
+        }
+        let props = Batch.Request.CreateShape.ElementProperties(
+            pageObjectId: slideId,
+            size: .init(width: .init(magnitude: emu(width), unit: "EMU"),
+                        height: .init(magnitude: emu(height), unit: "EMU")),
+            transform: .init(scaleX: 1, scaleY: 1,
+                             translateX: emu(x), translateY: emu(y), unit: "EMU"))
+        var requests: [Batch.Request] = [.init(
+            createShape: .init(objectId: boxId, shapeType: "TEXT_BOX", elementProperties: props),
+            insertText: nil)]
+        // A newly created box starts empty; a same-batch insertText fills it.
+        if let text, !text.isEmpty {
+            requests.append(.init(
+                createShape: nil,
+                insertText: .init(objectId: boxId, insertionIndex: 0, text: text)))
+        }
+        let payload = try JSONEncoder().encode(Batch(requests: requests))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not creating\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("created textbox: \(boxId)\n")
     }
 }
 

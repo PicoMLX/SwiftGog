@@ -3056,7 +3056,10 @@ extension Trait where Self == WriteTierTrait {
         }
         #expect(run.exitStatus == .success)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
-        #expect(body.contains(#""cellLocation":{"rowIndex":1,"columnIndex":2}"#))
+        // JSONEncoder emits object keys in a per-process-random order, so check
+        // each field independently rather than a fixed rowIndex/columnIndex order.
+        #expect(body.contains("cellLocation"))
+        #expect(body.contains(#""rowIndex":1"#) && body.contains(#""columnIndex":2"#))
     }
 
     @Test func slidesInsertTextRequiresRowAndColTogether() async throws {
@@ -3066,6 +3069,99 @@ extension Trait where Self == WriteTierTrait {
             "gog slides insert-text P1 tbl1 --text Hi --row 1")
         #expect(run.exitStatus == ExitStatus(2))
         #expect(run.stderr.contains("--row and --col"))
+    }
+
+    @Test func slidesCreateTablePostsCreateTable() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides create-table P1 s1 --rows 2 --cols 3 --object-id tbl1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate")
+            == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("createTable") && body.contains(#""pageObjectId":"s1""#))
+        #expect(body.contains(#""rows":2"#) && body.contains(#""columns":3"#))
+        #expect(body.contains(#""objectId":"tbl1""#))
+    }
+
+    @Test func slidesCreateTableRejectsNonPositive() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog slides create-table P1 s1 --rows 0 --cols 3")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("must be positive"))
+    }
+
+    @Test func slidesCreateTextboxPostsCreateShape() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides create-textbox P1 s1 --object-id tb1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("createShape") && body.contains(#""shapeType":"TEXT_BOX""#))
+        #expect(body.contains(#""pageObjectId":"s1""#) && body.contains(#""objectId":"tb1""#))
+        #expect(body.contains(#""unit":"EMU""#))
+        #expect(!body.contains("insertText"))   // no --text ⇒ createShape only
+    }
+
+    @Test func slidesCreateTextboxWithTextAppendsInsertText() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog slides create-textbox P1 s1 --object-id tb1 --text Hi")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("createShape") && body.contains("insertText"))
+        #expect(body.contains(#""objectId":"tb1""#) && body.contains("Hi"))
+    }
+
+    @Test func slidesCreateTextboxRejectsNonPositiveSize() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing(
+            "gog slides create-textbox P1 s1 --width 0")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("must be positive"))
+    }
+
+    @Test func slidesCreateTextboxRejectsNonFiniteGeometry() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // --x inf parses to Double.infinity; the EMU Int conversion would trap,
+        // so it must be rejected as a usage error (exit 2), not crash.
+        let run = try await shell.runCapturing(
+            "gog slides create-textbox P1 s1 --x inf")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("finite"))
     }
 
     @Test func formsGetRenders() async throws {
