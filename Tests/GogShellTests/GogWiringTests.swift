@@ -3081,7 +3081,7 @@ extension Trait where Self == WriteTierTrait {
                 StubProvider(token: "t", accountHint: nil)
             ) {
                 try await shell.runCapturing(
-                    "gog slides create-table P1 s1 --rows 2 --cols 3 --object-id tbl1")
+                    "gog slides create-table P1 s1 --rows 2 --cols 3 --object-id table1")
             }
         }
         #expect(run.exitStatus == .success)
@@ -3091,7 +3091,7 @@ extension Trait where Self == WriteTierTrait {
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("createTable") && body.contains(#""pageObjectId":"s1""#))
         #expect(body.contains(#""rows":2"#) && body.contains(#""columns":3"#))
-        #expect(body.contains(#""objectId":"tbl1""#))
+        #expect(body.contains(#""objectId":"table1""#))
     }
 
     @Test func slidesCreateTableRejectsNonPositive() async throws {
@@ -3113,14 +3113,14 @@ extension Trait where Self == WriteTierTrait {
                 StubProvider(token: "t", accountHint: nil)
             ) {
                 try await shell.runCapturing(
-                    "gog slides create-textbox P1 s1 --object-id tb1")
+                    "gog slides create-textbox P1 s1 --object-id tbox01")
             }
         }
         #expect(run.exitStatus == .success)
         #expect(transport.lastMethod == "POST")
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("createShape") && body.contains(#""shapeType":"TEXT_BOX""#))
-        #expect(body.contains(#""pageObjectId":"s1""#) && body.contains(#""objectId":"tb1""#))
+        #expect(body.contains(#""pageObjectId":"s1""#) && body.contains(#""objectId":"tbox01""#))
         #expect(body.contains(#""unit":"EMU""#))
         #expect(!body.contains("insertText"))   // no --text ⇒ createShape only
     }
@@ -3135,13 +3135,13 @@ extension Trait where Self == WriteTierTrait {
                 StubProvider(token: "t", accountHint: nil)
             ) {
                 try await shell.runCapturing(
-                    "gog slides create-textbox P1 s1 --object-id tb1 --text Hi")
+                    "gog slides create-textbox P1 s1 --object-id tbox01 --text Hi")
             }
         }
         #expect(run.exitStatus == .success)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
         #expect(body.contains("createShape") && body.contains("insertText"))
-        #expect(body.contains(#""objectId":"tb1""#) && body.contains("Hi"))
+        #expect(body.contains(#""objectId":"tbox01""#) && body.contains("Hi"))
     }
 
     @Test func slidesCreateTextboxRejectsNonPositiveSize() async throws {
@@ -3174,7 +3174,7 @@ extension Trait where Self == WriteTierTrait {
                 StubProvider(token: "t", accountHint: nil)
             ) {
                 try await shell.runCapturing(
-                    "gog slides create-image P1 s1 --url https://example.com/i.png --object-id img1")
+                    "gog slides create-image P1 s1 --url https://example.com/i.png --object-id image1")
             }
         }
         #expect(run.exitStatus == .success)
@@ -3185,7 +3185,7 @@ extension Trait where Self == WriteTierTrait {
         #expect(body.contains("createImage") && body.contains(#""pageObjectId":"s1""#))
         // JSONEncoder escapes "/" as "\/", so check slash-free fragments of the URL.
         #expect(body.contains("example.com") && body.contains("i.png"))
-        #expect(body.contains(#""objectId":"img1""#))
+        #expect(body.contains(#""objectId":"image1""#))
     }
 
     @Test func slidesCreateImageRejectsNonHttpUrl() async throws {
@@ -3195,6 +3195,17 @@ extension Trait where Self == WriteTierTrait {
             "gog slides create-image P1 s1 --url /gog/local.png")
         #expect(run.exitStatus == ExitStatus(2))
         #expect(run.stderr.contains("public http"))
+    }
+
+    @Test func slidesCreateImageRejectsShortObjectId() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The Slides API requires 5-50 char object IDs, so a supplied "img1" is
+        // rejected up front rather than failing at the API layer.
+        let run = try await shell.runCapturing(
+            "gog slides create-image P1 s1 --url https://example.com/i.png --object-id img1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--object-id"))
     }
 
     @Test func docsInsertImagePostsInsertInlineImage() async throws {

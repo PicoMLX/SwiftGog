@@ -3806,6 +3806,23 @@ private func newSlidesObjectSuffix() -> String {
     UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
 }
 
+/// Validate a caller-supplied Slides object ID against the API's rule: 5-50
+/// characters, each a word char / `-` / `:`, starting with a word char.
+/// Auto-generated IDs already satisfy this; this guards `--object-id` so a
+/// too-short value like "img1" fails cleanly here instead of at the API.
+private func requireValidSlidesObjectId(_ id: String) throws {
+    func isWordChar(_ c: Character) -> Bool {
+        c.isASCII && (c.isLetter || c.isNumber || c == "_")
+    }
+    let validStart = id.first.map(isWordChar) ?? false
+    let validBody = id.allSatisfy { isWordChar($0) || $0 == "-" || $0 == ":" }
+    guard (5...50).contains(id.count), validStart, validBody else {
+        Shell.bashCurrent.stderr(
+            "gog: --object-id must be 5-50 chars (letters, digits, _, -, :) starting with a letter, digit, or _\n")
+        throw ExitCode(2)
+    }
+}
+
 /// `gog slides create-table <presentationId> <slideId> --rows R --cols C` — add an
 /// empty native table to a slide (Slides `batchUpdate` createTable). Fill its cells
 /// with `slides insert-text --row --col`. The table auto-sizes; `--object-id` names
@@ -3832,6 +3849,7 @@ struct SlidesCreateTable: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --rows and --cols must be positive\n")
             throw ExitCode(2)
         }
+        if let objectId { try requireValidSlidesObjectId(objectId) }
         let tableId = objectId ?? "table_\(newSlidesObjectSuffix())"
         struct Batch: Encodable {
             struct Request: Encodable {
@@ -3904,6 +3922,7 @@ struct SlidesCreateTextbox: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --width and --height must be positive\n")
             throw ExitCode(2)
         }
+        if let objectId { try requireValidSlidesObjectId(objectId) }
         let boxId = objectId ?? "textbox_\(newSlidesObjectSuffix())"
         // Slides geometry is EMU; expose points to the caller (1 pt = 12700 EMU).
         let emu = { (points: Double) in Int((points * 12700).rounded()) }
@@ -3993,6 +4012,7 @@ struct SlidesCreateImage: AsyncParsableCommand {
     func run() async throws {
         try requireWriteTier(.edit)
         try requirePublicImageURL(url)
+        if let objectId { try requireValidSlidesObjectId(objectId) }
         let imageId = objectId ?? "image_\(newSlidesObjectSuffix())"
         struct Batch: Encodable {
             struct Request: Encodable {
