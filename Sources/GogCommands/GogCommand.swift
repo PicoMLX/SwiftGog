@@ -3422,7 +3422,8 @@ struct GogSlides: AsyncParsableCommand {
                       SlidesReplaceText.self, SlidesListSlides.self,
                       SlidesDeleteSlide.self, SlidesReadSlide.self,
                       SlidesInsertText.self, SlidesCreateTable.self,
-                      SlidesCreateTextbox.self, SlidesCreateImage.self],
+                      SlidesCreateTextbox.self, SlidesCreateImage.self,
+                      SlidesMove.self, SlidesReorder.self],
         aliases: ["slide"])
 }
 
@@ -4041,6 +4042,186 @@ struct SlidesCreateImage: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("created image: \(imageId)\n")
+    }
+}
+
+/// `gog slides move <presentationId> <objectId> --x <pt> --y <pt>` — reposition a
+/// page element (and optionally rescale it) via `updatePageElementTransform`. It
+/// first reads the element's current transform and **preserves its scale, rotation,
+/// and shear** — ABSOLUTE mode replaces the whole transform, so unspecified parts
+/// would otherwise reset to zero — changing only the position, plus the scale when
+/// `--scale-x`/`--scale-y` are given. Find object IDs with `slides read-slide`.
+/// Points are converted to EMU (1 pt = 12700 EMU).
+struct SlidesMove: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "move",
+        abstract: "Reposition/rescale a slide element (--dry-run to preview).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Page element object ID (from `slides read-slide`).")
+    var objectId: String
+    @Option(name: .long, help: "New left position in points.") var x: Double
+    @Option(name: .long, help: "New top position in points.") var y: Double
+    @Option(name: .long, help: "Horizontal scale (default: keep current).") var scaleX: Double?
+    @Option(name: .long, help: "Vertical scale (default: keep current).") var scaleY: Double?
+    @Flag(name: .long, help: "Build the request but do not move.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    // Only the 2x2 matrix components are read; the translate is being replaced.
+    private struct Deck: Decodable {
+        struct Slide: Decodable {
+            struct Element: Decodable {
+                struct Transform: Decodable {
+                    let scaleX: Double?
+                    let scaleY: Double?
+                    let shearX: Double?
+                    let shearY: Double?
+                }
+                let objectId: String?
+                let transform: Transform?
+            }
+            let pageElements: [Element]?
+        }
+        let slides: [Slide]?
+    }
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard x.isFinite, y.isFinite, max(abs(x), abs(y)) < 1_000_000 else {
+            Shell.bashCurrent.stderr("gog: --x/--y must be finite and within range\n")
+            throw ExitCode(2)
+        }
+        // A supplied scale must be finite and non-zero; negative is allowed (flip).
+        for s in [scaleX, scaleY] where s != nil {
+            guard s!.isFinite, s! != 0 else {
+                Shell.bashCurrent.stderr("gog: --scale-x/--scale-y must be finite and non-zero\n")
+                throw ExitCode(2)
+            }
+        }
+        // Read the current transform so ABSOLUTE mode doesn't strip the element's
+        // scale/rotation/shear — only position (and scale, if given) should change.
+        let getURL = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId))",
+            query: [URLQueryItem(
+                name: "fields",
+                value: "slides(pageElements(objectId,transform(scaleX,scaleY,shearX,shearY)))")])
+        let deck = try JSONDecoder().decode(
+            Deck.self, from: try await GoogleHTTPClient().get(getURL))
+        guard let element = (deck.slides ?? [])
+            .flatMap({ $0.pageElements ?? [] })
+            .first(where: { $0.objectId == objectId }) else {
+            Shell.bashCurrent.stderr(
+                "gog: \(objectId) is not a page element in this presentation "
+                    + "(see `slides read-slide`)\n")
+            throw ExitCode(2)
+        }
+        let current = element.transform   // nil = identity (scale 1, no shear)
+        let emu = { (points: Double) in Int((points * 12700).rounded()) }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct UpdateTransform: Encodable {
+                    struct Transform: Encodable {
+                        let scaleX: Double
+                        let scaleY: Double
+                        let shearX: Double
+                        let shearY: Double
+                        let translateX: Int
+                        let translateY: Int
+                        let unit: String
+                    }
+                    let objectId: String
+                    let applyMode: String
+                    let transform: Transform
+                }
+                let updatePageElementTransform: UpdateTransform
+            }
+            let requests: [Request]
+        }
+        // Keep the current 2x2 matrix (identity if absent); override scale only when
+        // the caller asked. ABSOLUTE sets the whole transform, so this reposition
+        // leaves size/rotation/shear untouched.
+        let transform = Batch.Request.UpdateTransform.Transform(
+            scaleX: scaleX ?? current?.scaleX ?? 1,
+            scaleY: scaleY ?? current?.scaleY ?? 1,
+            shearX: current?.shearX ?? 0,
+            shearY: current?.shearY ?? 0,
+            translateX: emu(x), translateY: emu(y), unit: "EMU")
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(
+            updatePageElementTransform: .init(
+                objectId: objectId, applyMode: "ABSOLUTE", transform: transform))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not moving\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("moved: \(objectId)\n")
+    }
+}
+
+/// `gog slides reorder <presentationId> <objectId> --to front|back|forward|backward`
+/// — change a page element's z-order (`updatePageElementsZOrder`).
+struct SlidesReorder: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "reorder",
+        abstract: "Change a slide element's z-order (--dry-run to preview).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Page element object ID (from `slides read-slide`).")
+    var objectId: String
+    @Option(name: .long, help: "front, back, forward, or backward.") var to: String
+    @Flag(name: .long, help: "Build the request but do not reorder.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        let operation: String
+        switch to.lowercased() {
+        case "front": operation = "BRING_TO_FRONT"
+        case "back": operation = "SEND_TO_BACK"
+        case "forward": operation = "BRING_FORWARD"
+        case "backward": operation = "SEND_BACKWARD"
+        default:
+            Shell.bashCurrent.stderr(
+                "gog: --to must be front, back, forward, or backward\n")
+            throw ExitCode(2)
+        }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct ZOrder: Encodable {
+                    let pageElementObjectIds: [String]
+                    let operation: String
+                }
+                let updatePageElementsZOrder: ZOrder
+            }
+            let requests: [Request]
+        }
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(
+            updatePageElementsZOrder: .init(
+                pageElementObjectIds: [objectId], operation: operation))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not reordering\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("reordered \(objectId): \(operation)\n")
     }
 }
 
