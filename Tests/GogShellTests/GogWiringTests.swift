@@ -3239,6 +3239,34 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("finite"))
     }
 
+    @Test func slidesMoveAllowsNegativeScale() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        // Negative scale flips the element (valid in Slides), so it must be accepted.
+        // --scale-x=-1 (not "--scale-x -1") so the negative isn't parsed as a flag.
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides move P1 sh1 --x 0 --y 0 --scale-x=-1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains("updatePageElementTransform"))
+    }
+
+    @Test func slidesMoveRejectsZeroScale() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog slides move P1 sh1 --x 0 --y 0 --scale-x 0")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("non-zero"))
+    }
+
     @Test func slidesReorderPostsZOrder() async throws {
         let shell = Shell()
         shell.registerGogCommands()

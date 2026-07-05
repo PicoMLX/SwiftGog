@@ -4072,8 +4072,10 @@ struct SlidesMove: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --x/--y must be finite and within range\n")
             throw ExitCode(2)
         }
-        guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0 else {
-            Shell.bashCurrent.stderr("gog: --scale-x/--scale-y must be finite and positive\n")
+        // Negative scale is valid (it flips the element); only zero (degenerate)
+        // and non-finite (would trap the JSON encoder) are rejected.
+        guard scaleX.isFinite, scaleY.isFinite, scaleX != 0, scaleY != 0 else {
+            Shell.bashCurrent.stderr("gog: --scale-x/--scale-y must be finite and non-zero\n")
             throw ExitCode(2)
         }
         // Slides geometry is EMU; expose points to the caller (1 pt = 12700 EMU).
