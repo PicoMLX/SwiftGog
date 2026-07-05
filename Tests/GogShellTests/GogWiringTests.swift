@@ -3208,6 +3208,64 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("--object-id"))
     }
 
+    @Test func slidesMovePostsUpdateTransform() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides move P1 sh1 --x 100 --y 50")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate")
+            == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("updatePageElementTransform") && body.contains(#""objectId":"sh1""#))
+        #expect(body.contains(#""applyMode":"ABSOLUTE""#))
+        // 100 pt -> 1270000 EMU, 50 pt -> 635000 EMU.
+        #expect(body.contains(#""translateX":1270000"#) && body.contains(#""translateY":635000"#))
+    }
+
+    @Test func slidesMoveRejectsNonFiniteGeometry() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog slides move P1 sh1 --x inf --y 0")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("finite"))
+    }
+
+    @Test func slidesReorderPostsZOrder() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides reorder P1 sh1 --to front")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("updatePageElementsZOrder") && body.contains(#""operation":"BRING_TO_FRONT""#))
+        #expect(body.contains(#""sh1""#))
+    }
+
+    @Test func slidesReorderRejectsBadDirection() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog slides reorder P1 sh1 --to sideways")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("--to"))
+    }
+
     @Test func docsInsertImagePostsInsertInlineImage() async throws {
         let shell = Shell()
         shell.registerGogCommands()
