@@ -4045,26 +4045,47 @@ struct SlidesCreateImage: AsyncParsableCommand {
     }
 }
 
-/// `gog slides move <presentationId> <objectId> --x <pt> --y <pt>` — set a page
-/// element's absolute position (and optional scale) via `updatePageElementTransform`
-/// in ABSOLUTE mode (replaces the element's transform). Find object IDs with
-/// `slides read-slide`. Points are converted to EMU (1 pt = 12700 EMU).
+/// `gog slides move <presentationId> <objectId> --x <pt> --y <pt>` — reposition a
+/// page element (and optionally rescale it) via `updatePageElementTransform`. It
+/// first reads the element's current transform and **preserves its scale, rotation,
+/// and shear** — ABSOLUTE mode replaces the whole transform, so unspecified parts
+/// would otherwise reset to zero — changing only the position, plus the scale when
+/// `--scale-x`/`--scale-y` are given. Find object IDs with `slides read-slide`.
+/// Points are converted to EMU (1 pt = 12700 EMU).
 struct SlidesMove: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "move",
-        abstract: "Set a slide element's position/scale (--dry-run to preview).")
+        abstract: "Reposition/rescale a slide element (--dry-run to preview).")
 
     @Argument(help: "Presentation ID.") var presentationId: String
     @Argument(help: "Page element object ID (from `slides read-slide`).")
     var objectId: String
     @Option(name: .long, help: "New left position in points.") var x: Double
     @Option(name: .long, help: "New top position in points.") var y: Double
-    @Option(name: .long, help: "Horizontal scale factor (default 1).") var scaleX: Double = 1
-    @Option(name: .long, help: "Vertical scale factor (default 1).") var scaleY: Double = 1
+    @Option(name: .long, help: "Horizontal scale (default: keep current).") var scaleX: Double?
+    @Option(name: .long, help: "Vertical scale (default: keep current).") var scaleY: Double?
     @Flag(name: .long, help: "Build the request but do not move.")
     var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
     var json: Bool = false
+
+    // Only the 2x2 matrix components are read; the translate is being replaced.
+    private struct Deck: Decodable {
+        struct Slide: Decodable {
+            struct Element: Decodable {
+                struct Transform: Decodable {
+                    let scaleX: Double?
+                    let scaleY: Double?
+                    let shearX: Double?
+                    let shearY: Double?
+                }
+                let objectId: String?
+                let transform: Transform?
+            }
+            let pageElements: [Element]?
+        }
+        let slides: [Slide]?
+    }
 
     func run() async throws {
         try requireWriteTier(.edit)
@@ -4072,13 +4093,31 @@ struct SlidesMove: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --x/--y must be finite and within range\n")
             throw ExitCode(2)
         }
-        // Negative scale is valid (it flips the element); only zero (degenerate)
-        // and non-finite (would trap the JSON encoder) are rejected.
-        guard scaleX.isFinite, scaleY.isFinite, scaleX != 0, scaleY != 0 else {
-            Shell.bashCurrent.stderr("gog: --scale-x/--scale-y must be finite and non-zero\n")
+        // A supplied scale must be finite and non-zero; negative is allowed (flip).
+        for s in [scaleX, scaleY] where s != nil {
+            guard s!.isFinite, s! != 0 else {
+                Shell.bashCurrent.stderr("gog: --scale-x/--scale-y must be finite and non-zero\n")
+                throw ExitCode(2)
+            }
+        }
+        // Read the current transform so ABSOLUTE mode doesn't strip the element's
+        // scale/rotation/shear — only position (and scale, if given) should change.
+        let getURL = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId))",
+            query: [URLQueryItem(
+                name: "fields",
+                value: "slides(pageElements(objectId,transform(scaleX,scaleY,shearX,shearY)))")])
+        let deck = try JSONDecoder().decode(
+            Deck.self, from: try await GoogleHTTPClient().get(getURL))
+        guard let element = (deck.slides ?? [])
+            .flatMap({ $0.pageElements ?? [] })
+            .first(where: { $0.objectId == objectId }) else {
+            Shell.bashCurrent.stderr(
+                "gog: \(objectId) is not a page element in this presentation "
+                    + "(see `slides read-slide`)\n")
             throw ExitCode(2)
         }
-        // Slides geometry is EMU; expose points to the caller (1 pt = 12700 EMU).
+        let current = element.transform   // nil = identity (scale 1, no shear)
         let emu = { (points: Double) in Int((points * 12700).rounded()) }
         struct Batch: Encodable {
             struct Request: Encodable {
@@ -4086,6 +4125,8 @@ struct SlidesMove: AsyncParsableCommand {
                     struct Transform: Encodable {
                         let scaleX: Double
                         let scaleY: Double
+                        let shearX: Double
+                        let shearY: Double
                         let translateX: Int
                         let translateY: Int
                         let unit: String
@@ -4098,13 +4139,18 @@ struct SlidesMove: AsyncParsableCommand {
             }
             let requests: [Request]
         }
-        // ABSOLUTE replaces the element's transform, so position and scale are set
-        // outright (not concatenated) — no read of the current transform needed.
+        // Keep the current 2x2 matrix (identity if absent); override scale only when
+        // the caller asked. ABSOLUTE sets the whole transform, so this reposition
+        // leaves size/rotation/shear untouched.
+        let transform = Batch.Request.UpdateTransform.Transform(
+            scaleX: scaleX ?? current?.scaleX ?? 1,
+            scaleY: scaleY ?? current?.scaleY ?? 1,
+            shearX: current?.shearX ?? 0,
+            shearY: current?.shearY ?? 0,
+            translateX: emu(x), translateY: emu(y), unit: "EMU")
         let payload = try JSONEncoder().encode(Batch(requests: [.init(
             updatePageElementTransform: .init(
-                objectId: objectId, applyMode: "ABSOLUTE",
-                transform: .init(scaleX: scaleX, scaleY: scaleY,
-                                 translateX: emu(x), translateY: emu(y), unit: "EMU")))]))
+                objectId: objectId, applyMode: "ABSOLUTE", transform: transform))]))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not moving\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")

@@ -3208,11 +3208,13 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("--object-id"))
     }
 
-    @Test func slidesMovePostsUpdateTransform() async throws {
+    @Test func slidesMovePreservesTransformAndSetsPosition() async throws {
         let shell = Shell()
         shell.registerGogCommands()
-        let transport = RecordingTransport(
-            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        // GET returns sh1 already scaled 2x with shear; a plain move must preserve
+        // both and change only the position (the GET response also serves the POST).
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"slides":[{"pageElements":[{"objectId":"sh1","transform":{"scaleX":2,"scaleY":2,"shearX":0.5,"shearY":0}}]}]}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
@@ -3224,11 +3226,25 @@ extension Trait where Self == WriteTierTrait {
         #expect(transport.lastMethod == "POST")
         #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate")
             == true)
-        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
-        #expect(body.contains("updatePageElementTransform") && body.contains(#""objectId":"sh1""#))
-        #expect(body.contains(#""applyMode":"ABSOLUTE""#))
-        // 100 pt -> 1270000 EMU, 50 pt -> 635000 EMU.
-        #expect(body.contains(#""translateX":1270000"#) && body.contains(#""translateY":635000"#))
+        // Decode the POST body so numeric checks don't depend on float formatting.
+        struct Body: Decodable {
+            struct R: Decodable {
+                struct U: Decodable {
+                    struct T: Decodable {
+                        let scaleX: Double; let scaleY: Double; let shearX: Double
+                        let translateX: Int; let translateY: Int
+                    }
+                    let applyMode: String; let objectId: String; let transform: T
+                }
+                let updatePageElementTransform: U
+            }
+            let requests: [R]
+        }
+        let t = try JSONDecoder().decode(Body.self, from: transport.lastBody ?? Data())
+            .requests.first!.updatePageElementTransform
+        #expect(t.applyMode == "ABSOLUTE" && t.objectId == "sh1")
+        #expect(t.transform.scaleX == 2 && t.transform.scaleY == 2 && t.transform.shearX == 0.5) // preserved
+        #expect(t.transform.translateX == 1270000 && t.transform.translateY == 635000) // 100pt / 50pt
     }
 
     @Test func slidesMoveRejectsNonFiniteGeometry() async throws {
@@ -3242,8 +3258,9 @@ extension Trait where Self == WriteTierTrait {
     @Test func slidesMoveAllowsNegativeScale() async throws {
         let shell = Shell()
         shell.registerGogCommands()
-        let transport = RecordingTransport(
-            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        // GET must find sh1 (else it's "not a page element"); the response serves both.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"slides":[{"pageElements":[{"objectId":"sh1","transform":{"scaleX":1,"scaleY":1}}]}]}"#.utf8)))
         // Negative scale flips the element (valid in Slides), so it must be accepted.
         // --scale-x=-1 (not "--scale-x -1") so the negative isn't parsed as a flag.
         let run = try await GogTransportProvider.$current.withValue(transport) {
