@@ -3388,6 +3388,38 @@ extension Trait where Self == WriteTierTrait {
         #expect(reqs.map(\.insertText.text) == ["d", "c", "b", "a"])
     }
 
+    @Test func docsFillTableCoercesNonStringValues() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A 1x2 table; a number and a string should both insert (number -> "1").
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]},{"content":[{"startIndex":10}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[1,\"b\"]]'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        struct Body: Decodable {
+            struct R: Decodable {
+                struct I: Decodable {
+                    struct L: Decodable { let index: Int }
+                    let location: L
+                    let text: String
+                }
+                let insertText: I
+            }
+            let requests: [R]
+        }
+        let reqs = try JSONDecoder().decode(Body.self, from: transport.lastBody ?? Data()).requests
+        // Reverse order: cell (0,1)="b"@10 then (0,0)=1->"1"@5.
+        #expect(reqs.map(\.insertText.text) == ["b", "1"])
+        #expect(reqs.map(\.insertText.location.index) == [10, 5])
+    }
+
     @Test func docsFillTableRejectsBadJson() async throws {
         let shell = Shell()
         shell.registerGogCommands()

@@ -3134,10 +3134,12 @@ struct DocsFillTable: AsyncParsableCommand {
             Shell.bashCurrent.stderr("gog: --table must be non-negative\n")
             throw ExitCode(2)
         }
+        // Accept mixed cell types (strings, numbers, bools, null) like sheets, via
+        // CellValue; each is coerced to text below (null -> "" -> skipped).
         guard let rows = try? JSONDecoder().decode(
-            [[String]].self, from: Data(valuesJson.utf8)), !rows.isEmpty else {
+            [[CellValue]].self, from: Data(valuesJson.utf8)), !rows.isEmpty else {
             Shell.bashCurrent.stderr(
-                "gog: --values-json must be a non-empty JSON array of arrays of strings\n")
+                "gog: --values-json must be a non-empty JSON array of arrays of values\n")
             throw ExitCode(2)
         }
         // Read the document and locate the requested table's cell start indices.
@@ -3169,7 +3171,9 @@ struct DocsFillTable: AsyncParsableCommand {
                     "gog: value row \(r) has \(rowValues.count) cells but the table row has \(cells.count)\n")
                 throw ExitCode(2)
             }
-            for (c, text) in rowValues.enumerated() where !text.isEmpty {
+            for (c, cellValue) in rowValues.enumerated() {
+                let text = cellValue.text
+                guard !text.isEmpty else { continue }   // empty / null cells stay empty
                 guard let index = cells[c].content?.first?.startIndex else {
                     Shell.bashCurrent.stderr(
                         "gog: could not resolve the start index of cell (\(r),\(c))\n")
