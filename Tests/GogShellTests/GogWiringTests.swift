@@ -3463,6 +3463,43 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("out of range"))
     }
 
+    @Test func docsFillTableTargetsTab() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // --tab-id reads that tab's content (includeTabsContent) and tags the insert.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"tabs":[{"tabId":"t1","documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id t1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.urls.contains { $0.absoluteString.contains("includeTabsContent=true") })
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains(#""tabId":"t1""#) && body.contains(#""index":5"#) && body.contains("a"))
+    }
+
+    @Test func docsFillTableRejectsUnknownTab() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"tabs":[{"tabId":"t1","documentTab":{"body":{"content":[]}}}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id nope")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("no document tab"))
+    }
+
     @Test func docsInsertTableRejectsNegativeIndex() async throws {
         let shell = Shell()
         shell.registerGogCommands()

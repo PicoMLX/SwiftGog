@@ -3103,6 +3103,8 @@ struct DocsFillTable: AsyncParsableCommand {
     var valuesJson: String
     @Option(name: .long, help: "Which table (0-based, in document order; default 0).")
     var table: Int = 0
+    @Option(name: .long, help: "Fill a table in a specific document tab (default: the first tab).")
+    var tabId: String?
     @Flag(name: .long, help: "Build the request but do not fill.")
     var dryRun: Bool = false
     @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
@@ -3125,7 +3127,13 @@ struct DocsFillTable: AsyncParsableCommand {
             }
             let content: [Element]?
         }
+        struct Tab: Decodable {
+            struct DocumentTab: Decodable { let body: Body? }
+            let tabId: String?
+            let documentTab: DocumentTab?
+        }
         let body: Body?
+        let tabs: [Tab]?
     }
 
     func run() async throws {
@@ -3143,14 +3151,31 @@ struct DocsFillTable: AsyncParsableCommand {
             throw ExitCode(2)
         }
         // Read the document and locate the requested table's cell start indices.
+        // With --tab-id, request that tab's content (includeTabsContent) and read
+        // from it; otherwise read the default body (the first tab).
+        let cellFields = "content(table(tableRows(tableCells(content(startIndex)))))"
+        var query = [URLQueryItem(
+            name: "fields",
+            value: tabId == nil ? "body(\(cellFields))"
+                                : "tabs(tabId,documentTab(body(\(cellFields))))")]
+        if tabId != nil {
+            query.append(URLQueryItem(name: "includeTabsContent", value: "true"))
+        }
         let getURL = try googleURL(
-            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId))",
-            query: [URLQueryItem(
-                name: "fields",
-                value: "body(content(table(tableRows(tableCells(content(startIndex))))))")])
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId))", query: query)
         let doc = try JSONDecoder().decode(
             Doc.self, from: try await GoogleHTTPClient().get(getURL))
-        let tables = (doc.body?.content ?? []).compactMap { $0.table }
+        let content: [Doc.Body.Element]
+        if let tabId {
+            guard let tab = (doc.tabs ?? []).first(where: { $0.tabId == tabId }) else {
+                Shell.bashCurrent.stderr("gog: no document tab with id \(tabId)\n")
+                throw ExitCode(2)
+            }
+            content = tab.documentTab?.body?.content ?? []
+        } else {
+            content = doc.body?.content ?? []
+        }
+        let tables = content.compactMap { $0.table }
         guard table < tables.count else {
             Shell.bashCurrent.stderr(
                 "gog: document has \(tables.count) table(s); --table \(table) is out of range\n")
@@ -3192,7 +3217,7 @@ struct DocsFillTable: AsyncParsableCommand {
         struct Batch: Encodable {
             struct Request: Encodable {
                 struct InsertText: Encodable {
-                    struct Loc: Encodable { let index: Int }
+                    struct Loc: Encodable { let index: Int; let tabId: String? }
                     let location: Loc
                     let text: String
                 }
@@ -3201,7 +3226,8 @@ struct DocsFillTable: AsyncParsableCommand {
             let requests: [Request]
         }
         let payload = try JSONEncoder().encode(Batch(requests: inserts.map {
-            .init(insertText: .init(location: .init(index: $0.index), text: $0.text)) }))
+            .init(insertText: .init(
+                location: .init(index: $0.index, tabId: tabId), text: $0.text)) }))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not filling\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")

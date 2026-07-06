@@ -175,7 +175,7 @@ gog docs find-replace <documentId> --find foo --replace bar  # edit
 gog docs clear <documentId>                                  # full (empties the main tab; keeps the doc)
 gog docs insert-table <documentId> --rows 2 --cols 3         # edit (empty table at end; --index to place)
 gog docs insert-image <documentId> --url https://ex.com/logo.png  # edit (inline image from a public URL; --index to place)
-gog docs fill-table <documentId> --values-json '[["a","b"],["c","d"]]'  # edit (fill an existing table's cells; --table N for the Nth)
+gog docs fill-table <documentId> --values-json '[["a","b"],["c","d"]]'  # edit (fill cells; --table N for the Nth, --tab-id for a document tab)
 ```
 
 ## Sheets
