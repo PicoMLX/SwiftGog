@@ -3353,6 +3353,84 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("non-negative"))
     }
 
+    @Test func docsFillTablePostsReverseOrderInserts() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A non-table paragraph then a 2x2 table; cell start indices 5/10/20/25.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"body":{"content":[{},{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]},{"content":[{"startIndex":10}]}]},{"tableCells":[{"content":[{"startIndex":20}]},{"content":[{"startIndex":25}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\",\"b\"],[\"c\",\"d\"]]'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/documents/D1:batchUpdate") == true)
+        // Inserts must be ordered highest-index-first so earlier inserts don't shift
+        // later cells; each cell maps to its value.
+        struct Body: Decodable {
+            struct R: Decodable {
+                struct I: Decodable {
+                    struct L: Decodable { let index: Int }
+                    let location: L
+                    let text: String
+                }
+                let insertText: I
+            }
+            let requests: [R]
+        }
+        let reqs = try JSONDecoder().decode(Body.self, from: transport.lastBody ?? Data()).requests
+        #expect(reqs.map(\.insertText.location.index) == [25, 20, 10, 5])
+        #expect(reqs.map(\.insertText.text) == ["d", "c", "b", "a"])
+    }
+
+    @Test func docsFillTableRejectsBadJson() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog docs fill-table D1 --values-json notjson")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("JSON array"))
+    }
+
+    @Test func docsFillTableRejectsOversizedRow() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // 1x1 table, but the value row supplies 2 cells.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\",\"b\"]]'")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("table row has"))
+    }
+
+    @Test func docsFillTableRejectsTableOutOfRange() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --table 5")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("out of range"))
+    }
+
     @Test func docsInsertTableRejectsNegativeIndex() async throws {
         let shell = Shell()
         shell.registerGogCommands()
