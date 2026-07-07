@@ -3468,7 +3468,7 @@ extension Trait where Self == WriteTierTrait {
         shell.registerGogCommands()
         // --tab-id reads that tab's content (includeTabsContent) and tags the insert.
         let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
-            #"{"tabs":[{"tabId":"t1","documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}}]}"#.utf8)))
+            #"{"tabs":[{"tabProperties":{"tabId":"t1"},"documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}}]}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
@@ -3487,7 +3487,7 @@ extension Trait where Self == WriteTierTrait {
         let shell = Shell()
         shell.registerGogCommands()
         let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
-            #"{"tabs":[{"tabId":"t1","documentTab":{"body":{"content":[]}}}]}"#.utf8)))
+            #"{"tabs":[{"tabProperties":{"tabId":"t1"},"documentTab":{"body":{"content":[]}}}]}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
@@ -3498,6 +3498,25 @@ extension Trait where Self == WriteTierTrait {
         }
         #expect(run.exitStatus == ExitStatus(2))
         #expect(run.stderr.contains("no document tab"))
+    }
+
+    @Test func docsFillTableTargetsNestedTab() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The target tab is nested under a parent's childTabs; the search recurses.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"tabs":[{"tabProperties":{"tabId":"parent"},"documentTab":{"body":{"content":[]}},"childTabs":[{"tabProperties":{"tabId":"child"},"documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":7}]}]}]}}]}}}]}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id child")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains(#""tabId":"child""#) && body.contains(#""index":7"#))
     }
 
     @Test func docsInsertTableRejectsNegativeIndex() async throws {

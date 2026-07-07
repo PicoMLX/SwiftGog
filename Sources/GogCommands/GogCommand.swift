@@ -3128,9 +3128,11 @@ struct DocsFillTable: AsyncParsableCommand {
             let content: [Element]?
         }
         struct Tab: Decodable {
+            struct Properties: Decodable { let tabId: String? }
             struct DocumentTab: Decodable { let body: Body? }
-            let tabId: String?
+            let tabProperties: Properties?
             let documentTab: DocumentTab?
+            let childTabs: [Tab]?
         }
         let body: Body?
         let tabs: [Tab]?
@@ -3154,10 +3156,13 @@ struct DocsFillTable: AsyncParsableCommand {
         // With --tab-id, request that tab's content (includeTabsContent) and read
         // from it; otherwise read the default body (the first tab).
         let cellFields = "content(table(tableRows(tableCells(content(startIndex)))))"
+        // Tab IDs live under tabProperties.tabId (not a top-level field), and tabs
+        // can nest under childTabs — request both and search recursively.
+        let tabFields = "tabProperties(tabId),documentTab(body(\(cellFields)))"
         var query = [URLQueryItem(
             name: "fields",
             value: tabId == nil ? "body(\(cellFields))"
-                                : "tabs(tabId,documentTab(body(\(cellFields))))")]
+                                : "tabs(\(tabFields),childTabs(\(tabFields)))")]
         if tabId != nil {
             query.append(URLQueryItem(name: "includeTabsContent", value: "true"))
         }
@@ -3167,7 +3172,11 @@ struct DocsFillTable: AsyncParsableCommand {
             Doc.self, from: try await GoogleHTTPClient().get(getURL))
         let content: [Doc.Body.Element]
         if let tabId {
-            guard let tab = (doc.tabs ?? []).first(where: { $0.tabId == tabId }) else {
+            func flatten(_ tabs: [Doc.Tab]) -> [Doc.Tab] {
+                tabs.flatMap { [$0] + flatten($0.childTabs ?? []) }
+            }
+            guard let tab = flatten(doc.tabs ?? [])
+                .first(where: { $0.tabProperties?.tabId == tabId }) else {
                 Shell.bashCurrent.stderr("gog: no document tab with id \(tabId)\n")
                 throw ExitCode(2)
             }
