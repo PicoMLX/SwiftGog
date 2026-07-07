@@ -3136,6 +3136,7 @@ struct DocsFillTable: AsyncParsableCommand {
         }
         let body: Body?
         let tabs: [Tab]?
+        let revisionId: String?
     }
 
     func run() async throws {
@@ -3159,10 +3160,12 @@ struct DocsFillTable: AsyncParsableCommand {
         // Tab IDs live under tabProperties.tabId (not a top-level field), and tabs
         // can nest under childTabs — request both and search recursively.
         let tabFields = "tabProperties(tabId),documentTab(body(\(cellFields)))"
+        // revisionId backs writeControl below; `childTabs` (unqualified) pulls the
+        // whole nested-tab subtree so a tab at any depth is searchable.
         var query = [URLQueryItem(
             name: "fields",
-            value: tabId == nil ? "body(\(cellFields))"
-                                : "tabs(\(tabFields),childTabs(\(tabFields)))")]
+            value: tabId == nil ? "revisionId,body(\(cellFields))"
+                                : "revisionId,tabs(\(tabFields),childTabs)")]
         if tabId != nil {
             query.append(URLQueryItem(name: "includeTabsContent", value: "true"))
         }
@@ -3232,11 +3235,16 @@ struct DocsFillTable: AsyncParsableCommand {
                 }
                 let insertText: InsertText
             }
+            // requiredRevisionId makes the write fail (rather than apply stale
+            // indices) if the document changed between the read and this update.
+            struct WriteControl: Encodable { let requiredRevisionId: String }
             let requests: [Request]
+            let writeControl: WriteControl?
         }
-        let payload = try JSONEncoder().encode(Batch(requests: inserts.map {
-            .init(insertText: .init(
-                location: .init(index: $0.index, tabId: tabId), text: $0.text)) }))
+        let payload = try JSONEncoder().encode(Batch(
+            requests: inserts.map { .init(insertText: .init(
+                location: .init(index: $0.index, tabId: tabId), text: $0.text)) },
+            writeControl: doc.revisionId.map { .init(requiredRevisionId: $0) }))
         if dryRun {
             Shell.bashCurrent.stderr("dry-run: not filling\n")
             Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")

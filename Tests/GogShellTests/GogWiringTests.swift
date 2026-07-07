@@ -3358,7 +3358,7 @@ extension Trait where Self == WriteTierTrait {
         shell.registerGogCommands()
         // A non-table paragraph then a 2x2 table; cell start indices 5/10/20/25.
         let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
-            #"{"body":{"content":[{},{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]},{"content":[{"startIndex":10}]}]},{"tableCells":[{"content":[{"startIndex":20}]},{"content":[{"startIndex":25}]}]}]}}]}}"#.utf8)))
+            #"{"revisionId":"rev1","body":{"content":[{},{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]},{"content":[{"startIndex":10}]}]},{"tableCells":[{"content":[{"startIndex":20}]},{"content":[{"startIndex":25}]}]}]}}]}}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
@@ -3386,6 +3386,9 @@ extension Trait where Self == WriteTierTrait {
         let reqs = try JSONDecoder().decode(Body.self, from: transport.lastBody ?? Data()).requests
         #expect(reqs.map(\.insertText.location.index) == [25, 20, 10, 5])
         #expect(reqs.map(\.insertText.text) == ["d", "c", "b", "a"])
+        // writeControl guards against a concurrent edit between the read and write.
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#""requiredRevisionId":"rev1""#))
     }
 
     @Test func docsFillTableCoercesNonStringValues() async throws {
@@ -3503,20 +3506,21 @@ extension Trait where Self == WriteTierTrait {
     @Test func docsFillTableTargetsNestedTab() async throws {
         let shell = Shell()
         shell.registerGogCommands()
-        // The target tab is nested under a parent's childTabs; the search recurses.
+        // The target is a grandchild tab (2 levels deep); the recursive search plus
+        // the unqualified childTabs mask must reach it.
         let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
-            #"{"tabs":[{"tabProperties":{"tabId":"parent"},"documentTab":{"body":{"content":[]}},"childTabs":[{"tabProperties":{"tabId":"child"},"documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":7}]}]}]}}]}}}]}]}"#.utf8)))
+            #"{"tabs":[{"tabProperties":{"tabId":"parent"},"documentTab":{"body":{"content":[]}},"childTabs":[{"tabProperties":{"tabId":"mid"},"documentTab":{"body":{"content":[]}},"childTabs":[{"tabProperties":{"tabId":"grandchild"},"documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":7}]}]}]}}]}}}]}]}]}"#.utf8)))
         let run = try await GogTransportProvider.$current.withValue(transport) {
             try await GogCredentials.$current.withValue(
                 StubProvider(token: "t", accountHint: nil)
             ) {
                 try await shell.runCapturing(
-                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id child")
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id grandchild")
             }
         }
         #expect(run.exitStatus == .success)
         let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
-        #expect(body.contains(#""tabId":"child""#) && body.contains(#""index":7"#))
+        #expect(body.contains(#""tabId":"grandchild""#) && body.contains(#""index":7"#))
     }
 
     @Test func docsInsertTableRejectsNegativeIndex() async throws {
