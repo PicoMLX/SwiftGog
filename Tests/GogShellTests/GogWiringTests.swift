@@ -3353,6 +3353,176 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("non-negative"))
     }
 
+    @Test func docsFillTablePostsReverseOrderInserts() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A non-table paragraph then a 2x2 table; cell start indices 5/10/20/25.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"revisionId":"rev1","body":{"content":[{},{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]},{"content":[{"startIndex":10}]}]},{"tableCells":[{"content":[{"startIndex":20}]},{"content":[{"startIndex":25}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\",\"b\"],[\"c\",\"d\"]]'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/documents/D1:batchUpdate") == true)
+        // Inserts must be ordered highest-index-first so earlier inserts don't shift
+        // later cells; each cell maps to its value.
+        struct Body: Decodable {
+            struct R: Decodable {
+                struct I: Decodable {
+                    struct L: Decodable { let index: Int }
+                    let location: L
+                    let text: String
+                }
+                let insertText: I
+            }
+            let requests: [R]
+        }
+        let reqs = try JSONDecoder().decode(Body.self, from: transport.lastBody ?? Data()).requests
+        #expect(reqs.map(\.insertText.location.index) == [25, 20, 10, 5])
+        #expect(reqs.map(\.insertText.text) == ["d", "c", "b", "a"])
+        // writeControl guards against a concurrent edit between the read and write.
+        #expect(String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+            .contains(#""requiredRevisionId":"rev1""#))
+    }
+
+    @Test func docsFillTableCoercesNonStringValues() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A 1x2 table; a number and a string should both insert (number -> "1").
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]},{"content":[{"startIndex":10}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[1,\"b\"]]'")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        struct Body: Decodable {
+            struct R: Decodable {
+                struct I: Decodable {
+                    struct L: Decodable { let index: Int }
+                    let location: L
+                    let text: String
+                }
+                let insertText: I
+            }
+            let requests: [R]
+        }
+        let reqs = try JSONDecoder().decode(Body.self, from: transport.lastBody ?? Data()).requests
+        // Reverse order: cell (0,1)="b"@10 then (0,0)=1->"1"@5.
+        #expect(reqs.map(\.insertText.text) == ["b", "1"])
+        #expect(reqs.map(\.insertText.location.index) == [10, 5])
+    }
+
+    @Test func docsFillTableRejectsBadJson() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog docs fill-table D1 --values-json notjson")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("JSON array"))
+    }
+
+    @Test func docsFillTableRejectsOversizedRow() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // 1x1 table, but the value row supplies 2 cells.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\",\"b\"]]'")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("table row has"))
+    }
+
+    @Test func docsFillTableRejectsTableOutOfRange() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --table 5")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("out of range"))
+    }
+
+    @Test func docsFillTableTargetsTab() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // --tab-id reads that tab's content (includeTabsContent) and tags the insert.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"tabs":[{"tabProperties":{"tabId":"t1"},"documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":5}]}]}]}}]}}}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id t1")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.urls.contains { $0.absoluteString.contains("includeTabsContent=true") })
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains(#""tabId":"t1""#) && body.contains(#""index":5"#) && body.contains("a"))
+    }
+
+    @Test func docsFillTableRejectsUnknownTab() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"tabs":[{"tabProperties":{"tabId":"t1"},"documentTab":{"body":{"content":[]}}}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id nope")
+            }
+        }
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("no document tab"))
+    }
+
+    @Test func docsFillTableTargetsNestedTab() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // The target is a grandchild tab (2 levels deep); the recursive search plus
+        // the unqualified childTabs mask must reach it.
+        let transport = RecordingTransport(response: HTTPResponse(status: 200, body: Data(
+            #"{"tabs":[{"tabProperties":{"tabId":"parent"},"documentTab":{"body":{"content":[]}},"childTabs":[{"tabProperties":{"tabId":"mid"},"documentTab":{"body":{"content":[]}},"childTabs":[{"tabProperties":{"tabId":"grandchild"},"documentTab":{"body":{"content":[{"table":{"tableRows":[{"tableCells":[{"content":[{"startIndex":7}]}]}]}}]}}}]}]}]}"#.utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing(
+                    "gog docs fill-table D1 --values-json '[[\"a\"]]' --tab-id grandchild")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains(#""tabId":"grandchild""#) && body.contains(#""index":7"#))
+    }
+
     @Test func docsInsertTableRejectsNegativeIndex() async throws {
         let shell = Shell()
         shell.registerGogCommands()

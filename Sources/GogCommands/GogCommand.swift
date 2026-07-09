@@ -2685,10 +2685,10 @@ private struct TaskItem: Decodable {
 struct GogDocs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "docs",
-        abstract: "Google Docs (export via Drive; create/append/find-replace/clear/insert-table/insert-image).",
+        abstract: "Google Docs (export via Drive; create/append/find-replace/clear/insert-table/insert-image/fill-table).",
         subcommands: [DocsCat.self, DocsCreate.self, DocsAppend.self,
                       DocsFindReplace.self, DocsClear.self, DocsInsertTable.self,
-                      DocsInsertImage.self],
+                      DocsInsertImage.self, DocsFillTable.self],
         aliases: ["doc"])
 }
 
@@ -3085,6 +3085,179 @@ struct DocsInsertImage: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("inserted image: \(documentId)\n")
+    }
+}
+
+/// `gog docs fill-table <documentId> --values-json '[["a","b"],["c","d"]]'` — fill an
+/// existing table's cells with text. Docs `insertText` is index-based (no cell
+/// address like Slides), so this reads the document, locates the target table's cell
+/// start indices, and inserts **highest index first** so earlier inserts don't shift
+/// the later cells. Use after `docs insert-table`.
+struct DocsFillTable: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "fill-table",
+        abstract: "Fill a table's cells from a 2D JSON array (--dry-run to preview).")
+
+    @Argument(help: "Document ID.") var documentId: String
+    @Option(name: .long, help: #"Rows of cell strings, e.g. '[["a","b"],["c","d"]]'."#)
+    var valuesJson: String
+    @Option(name: .long, help: "Which table (0-based, in document order; default 0).")
+    var table: Int = 0
+    @Option(name: .long, help: "Fill a table in a specific document tab (default: the first tab).")
+    var tabId: String?
+    @Flag(name: .long, help: "Build the request but do not fill.")
+    var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.")
+    var json: Bool = false
+
+    private struct Doc: Decodable {
+        struct Body: Decodable {
+            struct Element: Decodable {
+                struct Table: Decodable {
+                    struct Row: Decodable {
+                        struct Cell: Decodable {
+                            struct Content: Decodable { let startIndex: Int? }
+                            let content: [Content]?
+                        }
+                        let tableCells: [Cell]?
+                    }
+                    let tableRows: [Row]?
+                }
+                let table: Table?
+            }
+            let content: [Element]?
+        }
+        struct Tab: Decodable {
+            struct Properties: Decodable { let tabId: String? }
+            struct DocumentTab: Decodable { let body: Body? }
+            let tabProperties: Properties?
+            let documentTab: DocumentTab?
+            let childTabs: [Tab]?
+        }
+        let body: Body?
+        let tabs: [Tab]?
+        let revisionId: String?
+    }
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        guard table >= 0 else {
+            Shell.bashCurrent.stderr("gog: --table must be non-negative\n")
+            throw ExitCode(2)
+        }
+        // Accept mixed cell types (strings, numbers, bools, null) like sheets, via
+        // CellValue; each is coerced to text below (null -> "" -> skipped).
+        guard let rows = try? JSONDecoder().decode(
+            [[CellValue]].self, from: Data(valuesJson.utf8)), !rows.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: --values-json must be a non-empty JSON array of arrays of values\n")
+            throw ExitCode(2)
+        }
+        // Read the document and locate the requested table's cell start indices.
+        // With --tab-id, request that tab's content (includeTabsContent) and read
+        // from it; otherwise read the default body (the first tab).
+        let cellFields = "content(table(tableRows(tableCells(content(startIndex)))))"
+        // Tab IDs live under tabProperties.tabId (not a top-level field), and tabs
+        // can nest under childTabs — request both and search recursively.
+        let tabFields = "tabProperties(tabId),documentTab(body(\(cellFields)))"
+        // revisionId backs writeControl below; `childTabs` (unqualified) pulls the
+        // whole nested-tab subtree so a tab at any depth is searchable.
+        var query = [URLQueryItem(
+            name: "fields",
+            value: tabId == nil ? "revisionId,body(\(cellFields))"
+                                : "revisionId,tabs(\(tabFields),childTabs)")]
+        if tabId != nil {
+            query.append(URLQueryItem(name: "includeTabsContent", value: "true"))
+        }
+        let getURL = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId))", query: query)
+        let doc = try JSONDecoder().decode(
+            Doc.self, from: try await GoogleHTTPClient().get(getURL))
+        let content: [Doc.Body.Element]
+        if let tabId {
+            func flatten(_ tabs: [Doc.Tab]) -> [Doc.Tab] {
+                tabs.flatMap { [$0] + flatten($0.childTabs ?? []) }
+            }
+            guard let tab = flatten(doc.tabs ?? [])
+                .first(where: { $0.tabProperties?.tabId == tabId }) else {
+                Shell.bashCurrent.stderr("gog: no document tab with id \(tabId)\n")
+                throw ExitCode(2)
+            }
+            content = tab.documentTab?.body?.content ?? []
+        } else {
+            content = doc.body?.content ?? []
+        }
+        let tables = content.compactMap { $0.table }
+        guard table < tables.count else {
+            Shell.bashCurrent.stderr(
+                "gog: document has \(tables.count) table(s); --table \(table) is out of range\n")
+            throw ExitCode(2)
+        }
+        let tableRows = tables[table].tableRows ?? []
+        guard rows.count <= tableRows.count else {
+            Shell.bashCurrent.stderr(
+                "gog: \(rows.count) value rows but the table has \(tableRows.count)\n")
+            throw ExitCode(2)
+        }
+        // Collect (insertIndex, text) for every non-empty cell value.
+        var inserts: [(index: Int, text: String)] = []
+        for (r, rowValues) in rows.enumerated() {
+            let cells = tableRows[r].tableCells ?? []
+            guard rowValues.count <= cells.count else {
+                Shell.bashCurrent.stderr(
+                    "gog: value row \(r) has \(rowValues.count) cells but the table row has \(cells.count)\n")
+                throw ExitCode(2)
+            }
+            for (c, cellValue) in rowValues.enumerated() {
+                let text = cellValue.text
+                guard !text.isEmpty else { continue }   // empty / null cells stay empty
+                guard let index = cells[c].content?.first?.startIndex else {
+                    Shell.bashCurrent.stderr(
+                        "gog: could not resolve the start index of cell (\(r),\(c))\n")
+                    throw ExitCode(2)
+                }
+                inserts.append((index, text))
+            }
+        }
+        guard !inserts.isEmpty else {
+            Shell.bashCurrent.stderr("gog: no non-empty cell values to insert\n")
+            throw ExitCode(2)
+        }
+        // Insert highest index first: an insert at index i shifts everything at or
+        // after i, so descending order keeps the not-yet-filled (lower) cells valid.
+        inserts.sort { $0.index > $1.index }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct InsertText: Encodable {
+                    struct Loc: Encodable { let index: Int; let tabId: String? }
+                    let location: Loc
+                    let text: String
+                }
+                let insertText: InsertText
+            }
+            // requiredRevisionId makes the write fail (rather than apply stale
+            // indices) if the document changed between the read and this update.
+            struct WriteControl: Encodable { let requiredRevisionId: String }
+            let requests: [Request]
+            let writeControl: WriteControl?
+        }
+        let payload = try JSONEncoder().encode(Batch(
+            requests: inserts.map { .init(insertText: .init(
+                location: .init(index: $0.index, tabId: tabId), text: $0.text)) },
+            writeControl: doc.revisionId.map { .init(requiredRevisionId: $0) }))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not filling\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://docs.googleapis.com/v1/documents/\(pathSegment(documentId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("filled \(inserts.count) cell(s): \(documentId)\n")
     }
 }
 

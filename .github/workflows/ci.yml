@@ -84,6 +84,12 @@ jobs:
         working-directory: SwiftGog
         run: swift build --build-tests -v
 
+      # Run tests serially. SwiftPM's parallel runner (swiftpm_testing_helper)
+      # dlopens the .xctest bundle from a process whose dyld search path omits the
+      # toolchain's swift lib dir, so on the Xcode 26 / Swift 6.2 runner it fails to
+      # load libswiftCompatibilitySpan.dylib (a Span back-deployment shim) and the
+      # whole suite aborts before running. --no-parallel uses the normal xctest path,
+      # which resolves the dylib. Mirrors SwiftBash's own macOS CI.
       - name: Test
         working-directory: SwiftGog
-        run: swift test --skip-build
+        run: swift test --skip-build --no-parallel
