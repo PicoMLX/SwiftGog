@@ -4445,7 +4445,10 @@ struct SlidesFormatText: AsyncParsableCommand {
         var rgb: (r: Double, g: Double, b: Double)?
         if let foreground {
             let hex = foreground.hasPrefix("#") ? String(foreground.dropFirst()) : foreground
-            guard hex.count == 6, let v = Int(hex, radix: 16) else {
+            // allSatisfy(isHexDigit) rejects a leading sign — Int(_:radix:) would
+            // otherwise accept "-F0000"/"+F0000" and yield a wrong color.
+            guard hex.count == 6, hex.allSatisfy(\.isHexDigit),
+                  let v = Int(hex, radix: 16) else {
                 Shell.bashCurrent.stderr("gog: --foreground must be a 6-digit hex RGB, e.g. FF0000\n")
                 throw ExitCode(2)
             }
@@ -4461,6 +4464,10 @@ struct SlidesFormatText: AsyncParsableCommand {
         }
         guard (row == nil) == (col == nil) else {
             Shell.bashCurrent.stderr("gog: --row and --col must be given together (table cell)\n")
+            throw ExitCode(2)
+        }
+        if let row, let col, !(row >= 0 && col >= 0) {
+            Shell.bashCurrent.stderr("gog: --row and --col must be non-negative\n")
             throw ExitCode(2)
         }
         struct Batch: Encodable {

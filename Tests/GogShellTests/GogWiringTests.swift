@@ -3407,6 +3407,24 @@ extension Trait where Self == WriteTierTrait {
         #expect(body.contains(#""rowIndex":1"#) && body.contains(#""columnIndex":2"#))
     }
 
+    @Test func slidesFormatTextRejectsSignedHex() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A signed 6-char value parses as an Int but isn't a valid color;
+        // --foreground=-F0000 (equals form) so the value isn't parsed as a flag.
+        let run = try await shell.runCapturing("gog slides format-text P1 sh1 --foreground=-F0000")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("hex"))
+    }
+
+    @Test func slidesFormatTextRejectsNegativeCell() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog slides format-text P1 tbl1 --bold --row=-1 --col 0")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("non-negative"))
+    }
+
     @Test func docsInsertImagePostsInsertInlineImage() async throws {
         let shell = Shell()
         shell.registerGogCommands()
