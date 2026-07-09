@@ -3311,6 +3311,120 @@ extension Trait where Self == WriteTierTrait {
         #expect(run.stderr.contains("--to"))
     }
 
+    @Test func slidesFormatTextPostsUpdateTextStyle() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides format-text P1 sh1 --bold --font-size 18")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        #expect(transport.lastMethod == "POST")
+        #expect(transport.lastURL?.absoluteString.contains("/presentations/P1:batchUpdate") == true)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("updateTextStyle") && body.contains(#""objectId":"sh1""#))
+        #expect(body.contains(#""type":"ALL""#) && body.contains(#""bold":true"#))
+        #expect(body.contains(#""fields":"bold,fontSize""#))   // mask lists only set props, in order
+    }
+
+    @Test func slidesFormatTextRequiresAStyle() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog slides format-text P1 sh1")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("at least one"))
+    }
+
+    @Test func slidesFormatTextParsesForegroundHex() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides format-text P1 sh1 --foreground FF0000")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        // Decode so numeric checks don't depend on float formatting.
+        struct Body: Decodable {
+            struct R: Decodable {
+                struct U: Decodable {
+                    struct S: Decodable {
+                        struct C: Decodable {
+                            struct O: Decodable {
+                                struct Rgb: Decodable { let red: Double; let green: Double; let blue: Double }
+                                let rgbColor: Rgb
+                            }
+                            let opaqueColor: O
+                        }
+                        let foregroundColor: C
+                    }
+                    let style: S
+                    let fields: String
+                }
+                let updateTextStyle: U
+            }
+            let requests: [R]
+        }
+        let u = try JSONDecoder().decode(Body.self, from: transport.lastBody ?? Data())
+            .requests.first!.updateTextStyle
+        let rgb = u.style.foregroundColor.opaqueColor.rgbColor
+        #expect(rgb.red == 1 && rgb.green == 0 && rgb.blue == 0)   // FF0000
+        #expect(u.fields == "foregroundColor")
+    }
+
+    @Test func slidesFormatTextRejectsBadHex() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog slides format-text P1 sh1 --foreground ZZ")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("hex"))
+    }
+
+    @Test func slidesFormatTextIntoCellEncodesCellLocation() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let transport = RecordingTransport(
+            response: HTTPResponse(status: 200, body: Data("{}".utf8)))
+        let run = try await GogTransportProvider.$current.withValue(transport) {
+            try await GogCredentials.$current.withValue(
+                StubProvider(token: "t", accountHint: nil)
+            ) {
+                try await shell.runCapturing("gog slides format-text P1 tbl1 --bold --row 1 --col 2")
+            }
+        }
+        #expect(run.exitStatus == .success)
+        let body = String(decoding: transport.lastBody ?? Data(), as: UTF8.self)
+        #expect(body.contains("cellLocation"))
+        #expect(body.contains(#""rowIndex":1"#) && body.contains(#""columnIndex":2"#))
+    }
+
+    @Test func slidesFormatTextRejectsSignedHex() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        // A signed 6-char value parses as an Int but isn't a valid color;
+        // --foreground=-F0000 (equals form) so the value isn't parsed as a flag.
+        let run = try await shell.runCapturing("gog slides format-text P1 sh1 --foreground=-F0000")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("hex"))
+    }
+
+    @Test func slidesFormatTextRejectsNegativeCell() async throws {
+        let shell = Shell()
+        shell.registerGogCommands()
+        let run = try await shell.runCapturing("gog slides format-text P1 tbl1 --bold --row=-1 --col 0")
+        #expect(run.exitStatus == ExitStatus(2))
+        #expect(run.stderr.contains("non-negative"))
+    }
+
     @Test func docsInsertImagePostsInsertInlineImage() async throws {
         let shell = Shell()
         shell.registerGogCommands()

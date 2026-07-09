@@ -84,12 +84,20 @@ jobs:
         working-directory: SwiftGog
         run: swift build --build-tests -v
 
-      # Run tests serially. SwiftPM's parallel runner (swiftpm_testing_helper)
-      # dlopens the .xctest bundle from a process whose dyld search path omits the
-      # toolchain's swift lib dir, so on the Xcode 26 / Swift 6.2 runner it fails to
-      # load libswiftCompatibilitySpan.dylib (a Span back-deployment shim) and the
-      # whole suite aborts before running. --no-parallel uses the normal xctest path,
-      # which resolves the dylib. Mirrors SwiftBash's own macOS CI.
+      # macos-latest now ships Xcode 26.0.1, whose `swift test` runner dlopens the
+      # xctest bundle without the toolchain lib dir on its dyld search path, so it
+      # can't load libswiftCompatibilitySpan.dylib — a Span back-deployment shim
+      # linked for our macOS 13 target — and the suite aborts before any test runs.
+      # Locate that shim in the active toolchain and put its directory on
+      # DYLD_FALLBACK_LIBRARY_PATH so the bundle resolves it. The echo is a
+      # self-diagnostic: if the shim isn't found, the log says so. (--no-parallel
+      # keeps the task-local-based tests serial.)
       - name: Test
         working-directory: SwiftGog
-        run: swift test --skip-build --no-parallel
+        run: |
+          span="$(find "$(xcode-select -p)/Toolchains" -name libswiftCompatibilitySpan.dylib 2>/dev/null | head -1)"
+          echo "libswiftCompatibilitySpan.dylib: ${span:-<not found>}"
+          if [ -n "$span" ]; then
+            export DYLD_FALLBACK_LIBRARY_PATH="$(dirname "$span"):${DYLD_FALLBACK_LIBRARY_PATH:-}"
+          fi
+          swift test --skip-build --no-parallel
