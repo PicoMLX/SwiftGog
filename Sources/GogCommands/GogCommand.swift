@@ -3596,7 +3596,8 @@ struct GogSlides: AsyncParsableCommand {
                       SlidesDeleteSlide.self, SlidesReadSlide.self,
                       SlidesInsertText.self, SlidesCreateTable.self,
                       SlidesCreateTextbox.self, SlidesCreateImage.self,
-                      SlidesMove.self, SlidesReorder.self],
+                      SlidesMove.self, SlidesReorder.self,
+                      SlidesFormatText.self],
         aliases: ["slide"])
 }
 
@@ -4395,6 +4396,133 @@ struct SlidesReorder: AsyncParsableCommand {
             return
         }
         Shell.bashCurrent.stdout("reordered \(objectId): \(operation)\n")
+    }
+}
+
+/// `gog slides format-text <presentationId> <objectId>` — set text style (bold /
+/// italic / underline / size / color) on a shape, or a table cell with `--row`/`--col`,
+/// via `updateTextStyle`. Styles all of the element's text by default, or a
+/// `--start`/`--end` range. Find object IDs with `slides read-slide`.
+struct SlidesFormatText: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "format-text",
+        abstract: "Set bold/italic/underline/size/color on a slide element's text (--dry-run).")
+
+    @Argument(help: "Presentation ID.") var presentationId: String
+    @Argument(help: "Page element object ID (from `slides read-slide`).")
+    var objectId: String
+    @Flag(inversion: .prefixedNo, help: "Bold (--no-bold to unset).") var bold: Bool?
+    @Flag(inversion: .prefixedNo, help: "Italic (--no-italic to unset).") var italic: Bool?
+    @Flag(inversion: .prefixedNo, help: "Underline (--no-underline to unset).") var underline: Bool?
+    @Option(name: .long, help: "Font size in points.") var fontSize: Double?
+    @Option(name: .long, help: "Text color as hex RGB, e.g. FF0000.") var foreground: String?
+    @Option(name: .long, help: "Range start index within the element (with --end).") var start: Int?
+    @Option(name: .long, help: "Range end index within the element (with --start).") var end: Int?
+    @Option(name: .long, help: "Table cell row (0-based); requires --col.") var row: Int?
+    @Option(name: .long, help: "Table cell column (0-based); requires --row.") var col: Int?
+    @Flag(name: .long, help: "Build the request but do not apply.") var dryRun: Bool = false
+    @Flag(name: [.customShort("j"), .long], help: "Emit raw JSON.") var json: Bool = false
+
+    func run() async throws {
+        try requireWriteTier(.edit)
+        // Build the field mask from whichever style options were given.
+        var fields: [String] = []
+        if bold != nil { fields.append("bold") }
+        if italic != nil { fields.append("italic") }
+        if underline != nil { fields.append("underline") }
+        if fontSize != nil { fields.append("fontSize") }
+        if foreground != nil { fields.append("foregroundColor") }
+        guard !fields.isEmpty else {
+            Shell.bashCurrent.stderr(
+                "gog: give at least one of --bold/--italic/--underline/--font-size/--foreground\n")
+            throw ExitCode(2)
+        }
+        if let fontSize, !(fontSize.isFinite && fontSize > 0) {
+            Shell.bashCurrent.stderr("gog: --font-size must be a positive number\n")
+            throw ExitCode(2)
+        }
+        // Parse "RRGGBB" (or "#RRGGBB") to 0-1 RGB components.
+        var rgb: (r: Double, g: Double, b: Double)?
+        if let foreground {
+            let hex = foreground.hasPrefix("#") ? String(foreground.dropFirst()) : foreground
+            guard hex.count == 6, let v = Int(hex, radix: 16) else {
+                Shell.bashCurrent.stderr("gog: --foreground must be a 6-digit hex RGB, e.g. FF0000\n")
+                throw ExitCode(2)
+            }
+            rgb = (Double((v >> 16) & 0xFF) / 255, Double((v >> 8) & 0xFF) / 255, Double(v & 0xFF) / 255)
+        }
+        guard (start == nil) == (end == nil) else {
+            Shell.bashCurrent.stderr("gog: --start and --end must be given together (a range)\n")
+            throw ExitCode(2)
+        }
+        if let start, let end, !(start >= 0 && end > start) {
+            Shell.bashCurrent.stderr("gog: --start must be >= 0 and --end greater than --start\n")
+            throw ExitCode(2)
+        }
+        guard (row == nil) == (col == nil) else {
+            Shell.bashCurrent.stderr("gog: --row and --col must be given together (table cell)\n")
+            throw ExitCode(2)
+        }
+        struct Batch: Encodable {
+            struct Request: Encodable {
+                struct UpdateTextStyle: Encodable {
+                    struct CellLocation: Encodable { let rowIndex: Int; let columnIndex: Int }
+                    struct TextRange: Encodable {
+                        let type: String
+                        let startIndex: Int?
+                        let endIndex: Int?
+                    }
+                    struct Style: Encodable {
+                        struct FontSize: Encodable { let magnitude: Double; let unit: String }
+                        struct Color: Encodable {
+                            struct Opaque: Encodable {
+                                struct Rgb: Encodable { let red: Double; let green: Double; let blue: Double }
+                                let rgbColor: Rgb
+                            }
+                            let opaqueColor: Opaque
+                        }
+                        let bold: Bool?
+                        let italic: Bool?
+                        let underline: Bool?
+                        let fontSize: FontSize?
+                        let foregroundColor: Color?
+                    }
+                    let objectId: String
+                    let cellLocation: CellLocation?
+                    let textRange: TextRange
+                    let style: Style
+                    let fields: String
+                }
+                let updateTextStyle: UpdateTextStyle
+            }
+            let requests: [Request]
+        }
+        let cell = row.flatMap { r in
+            col.map { Batch.Request.UpdateTextStyle.CellLocation(rowIndex: r, columnIndex: $0) } }
+        let textRange = start.flatMap { s in end.map { e in
+            Batch.Request.UpdateTextStyle.TextRange(type: "FIXED_RANGE", startIndex: s, endIndex: e) } }
+            ?? .init(type: "ALL", startIndex: nil, endIndex: nil)
+        let style = Batch.Request.UpdateTextStyle.Style(
+            bold: bold, italic: italic, underline: underline,
+            fontSize: fontSize.map { .init(magnitude: $0, unit: "PT") },
+            foregroundColor: rgb.map {
+                .init(opaqueColor: .init(rgbColor: .init(red: $0.r, green: $0.g, blue: $0.b))) })
+        let payload = try JSONEncoder().encode(Batch(requests: [.init(updateTextStyle: .init(
+            objectId: objectId, cellLocation: cell, textRange: textRange, style: style,
+            fields: fields.joined(separator: ",")))]))
+        if dryRun {
+            Shell.bashCurrent.stderr("dry-run: not formatting\n")
+            Shell.bashCurrent.stdout(String(decoding: payload, as: UTF8.self) + "\n")
+            return
+        }
+        let url = try googleURL(
+            "https://slides.googleapis.com/v1/presentations/\(pathSegment(presentationId)):batchUpdate")
+        let result = try await GoogleHTTPClient().post(url, jsonBody: payload)
+        if json {
+            Shell.bashCurrent.stdout(String(decoding: result, as: UTF8.self) + "\n")
+            return
+        }
+        Shell.bashCurrent.stdout("formatted text in: \(objectId)\n")
     }
 }
 

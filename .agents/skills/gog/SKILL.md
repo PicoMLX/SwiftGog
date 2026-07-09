@@ -204,6 +204,7 @@ gog slides list-slides <presentationId>                           # read (slide 
 gog slides delete-slide <presentationId> <slideObjectId>          # full
 gog slides read-slide <presentationId> <slideObjectId>            # read (element objectIds + text)
 gog slides insert-text <presentationId> <objectId> --text 'Hi'    # edit (shape; add --row/--col for a table cell)
+gog slides format-text <presentationId> <objectId> --bold --font-size 18  # edit (style text: bold/italic/underline/--foreground hex; all text or --start/--end; --row/--col for a cell)
 gog slides move <presentationId> <elementObjectId> --x 100 --y 100        # edit (reposition, preserving scale/rotation; --scale-x/--scale-y to rescale)
 gog slides reorder <presentationId> <elementObjectId> --to front          # edit (z-order: front/back/forward/backward)
 ```
